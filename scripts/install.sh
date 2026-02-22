@@ -27,7 +27,7 @@ fi
 # Install datasette if not present
 if ! command -v datasette &> /dev/null; then
     echo "Installing datasette..."
-    pip3 install datasette --quiet
+    pipx install datasette 2>&1 || true
 fi
 
 # Clone or update repo
