@@ -9,7 +9,6 @@ Restart=on-failure
 RestartSec=5
 Environment=ARGUS_DB=/root/.argus/argus.db
 Environment=ARGUS_PORT=8100
-Environment=ARGUS_DASHBOARD_PORT=8101
 
 [Install]
 WantedBy=multi-user.target

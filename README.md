@@ -83,8 +83,7 @@ Environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ARGUS_DB` | `~/.argus/argus.db` | Database path |
-| `ARGUS_PORT` | `8100` | Datasette API port |
-| `ARGUS_DASHBOARD_PORT` | `8101` | Dashboard port |
+| `ARGUS_PORT` | `8100` | Dashboard port (datasette runs on port+1) |
 | `GH_TOKEN` | — | GitHub API token |
 
 ## Architecture
@@ -104,10 +103,12 @@ Environment variables:
         ┌─────────┴─────────┐
         ▼                   ▼
 ┌───────────────┐   ┌───────────────┐
-│   Datasette   │   │   Dashboard   │
-│  :8100 (API)  │   │ :8101 (HTML)  │
+│   Dashboard   │   │   Datasette   │
+│  :PORT (HTML) │   │ :PORT+1 (API) │
 └───────────────┘   └───────────────┘
 ```
+
+Default: Dashboard on 8100, Datasette on 8101. Set `ARGUS_PORT` to change base port.
 
 ## Installation
 

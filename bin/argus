@@ -21,8 +21,7 @@ from typing import Optional
 
 VERSION = "0.1.0"
 DEFAULT_DB_PATH = Path.home() / ".argus" / "argus.db"
-DEFAULT_PORT = 8100
-DEFAULT_DASHBOARD_PORT = 8101
+DEFAULT_PORT = 8100  # Dashboard port; datasette runs on port+1
 
 def get_db_path() -> Path:
     return Path(os.environ.get("ARGUS_DB", DEFAULT_DB_PATH))
@@ -474,31 +473,47 @@ def cmd_escalate_resolve(args) -> None:
 def cmd_serve(args) -> None:
     """Start datasette + dashboard servers."""
     import http.server
-    import threading
     
     db_path = get_db_path()
     dashboard_path = get_dashboard_path()
     
+    # Single port config: dashboard on port, datasette on port+1
     port = args.port or int(os.environ.get("ARGUS_PORT", DEFAULT_PORT))
-    dashboard_port = args.dashboard_port or int(os.environ.get("ARGUS_DASHBOARD_PORT", DEFAULT_DASHBOARD_PORT))
+    datasette_port = port + 1
     
     print(f"Starting Argus servers...")
-    print(f"  Datasette:  http://localhost:{port}")
-    print(f"  Dashboard:  http://localhost:{dashboard_port}")
+    print(f"  Dashboard:  http://localhost:{port}")
+    print(f"  Datasette:  http://localhost:{datasette_port}")
     print()
     
     # Start datasette in background
     datasette_proc = subprocess.Popen(
-        ["datasette", str(db_path), "-p", str(port), "--cors"],
+        ["datasette", str(db_path), "-p", str(datasette_port), "--cors"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
     )
     
-    # Start simple HTTP server for dashboard
+    # Custom handler that injects the datasette port into the dashboard
+    class ArgusHandler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/" or self.path == "/index.html":
+                self.send_response(200)
+                self.send_header("Content-type", "text/html")
+                self.end_headers()
+                with open(dashboard_path) as f:
+                    html = f.read()
+                # Inject datasette port config
+                html = html.replace(
+                    "const API_BASE = 'http://localhost:8100'",
+                    f"const API_BASE = 'http://localhost:{datasette_port}'"
+                )
+                self.wfile.write(html.encode())
+            else:
+                super().do_GET()
+    
     os.chdir(dashboard_path.parent)
     
-    handler = http.server.SimpleHTTPRequestHandler
-    with http.server.HTTPServer(("", dashboard_port), handler) as httpd:
+    with http.server.HTTPServer(("", port), ArgusHandler) as httpd:
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
@@ -579,8 +594,7 @@ def main():
     
     # Serve command
     serve_parser = subparsers.add_parser("serve", help="Start servers")
-    serve_parser.add_argument("--port", type=int, help=f"Datasette port (default: {DEFAULT_PORT})")
-    serve_parser.add_argument("--dashboard-port", type=int, help=f"Dashboard port (default: {DEFAULT_DASHBOARD_PORT})")
+    serve_parser.add_argument("--port", type=int, help=f"Dashboard port (default: {DEFAULT_PORT}); datasette runs on port+1")
     
     args = parser.parse_args()
     

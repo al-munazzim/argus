@@ -69,8 +69,7 @@ argus serve [--port 8100] [--dashboard-port 8101]
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ARGUS_DB` | `~/.argus/argus.db` | Database path |
-| `ARGUS_PORT` | `8100` | Datasette port |
-| `ARGUS_DASHBOARD_PORT` | `8101` | Dashboard port |
+| `ARGUS_PORT` | `8100` | Dashboard port (datasette on port+1) |
 | `GH_TOKEN` | — | GitHub API token |
 
 ## Workflow
