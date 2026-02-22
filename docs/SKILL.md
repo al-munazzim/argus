@@ -152,3 +152,59 @@ argus escalate resolve <id> --by WHO --resolution "..."
    - If not relevant: `argus notif dismiss <id> "Not my area"`
 4. **Audit**: `argus notif audit` (escalates stale items)
 5. **Log**: `argus activity log triage "Processed 5 notifications"`
+
+---
+
+## Cron Jobs (Automated Auditing)
+
+Set up cron jobs to automatically audit stale notifications twice daily.
+
+### Step 1: Add Cron Jobs
+
+Use the OpenClaw `cron` tool to add these jobs:
+
+**Morning Audit (11:00 CET):**
+```json
+{
+  "name": "argus-audit-morning",
+  "schedule": {"kind": "cron", "expr": "0 10 * * *", "tz": "Europe/Berlin"},
+  "payload": {
+    "kind": "agentTurn",
+    "message": "Run notification audit: ARGUS_BACKEND=tea argus notif audit --stale-hours 6. If escalations created, summarize them briefly."
+  },
+  "sessionTarget": "isolated",
+  "delivery": {"mode": "announce"}
+}
+```
+
+**Afternoon Audit (15:00 CET):**
+```json
+{
+  "name": "argus-audit-afternoon", 
+  "schedule": {"kind": "cron", "expr": "0 14 * * *", "tz": "Europe/Berlin"},
+  "payload": {
+    "kind": "agentTurn",
+    "message": "Run notification audit: ARGUS_BACKEND=tea argus notif audit --stale-hours 6. If escalations created, summarize them briefly."
+  },
+  "sessionTarget": "isolated",
+  "delivery": {"mode": "announce"}
+}
+```
+
+### Step 2: Verify Cron Jobs
+
+Check that the jobs are registered:
+```bash
+# Via cron tool
+cron list
+```
+
+Expected output should show `argus-audit-morning` and `argus-audit-afternoon`.
+
+### What the Audit Does
+
+- Checks all pending notifications older than 6 hours
+- Creates escalations for stale items
+- Reports summary back to your channel
+
+Adjust `--stale-hours` based on your responsiveness requirements.
