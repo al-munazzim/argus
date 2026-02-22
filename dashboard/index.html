@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Argus Dashboard</title>
+    <style>
+        :root {
+            --bg: #1a1a2e;
+            --card-bg: #16213e;
+            --accent: #e94560;
+            --text: #eee;
+            --text-dim: #888;
+            --success: #4ade80;
+            --warning: #fbbf24;
+        }
+        
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            padding: 2rem;
+            min-height: 100vh;
+        }
+        
+        h1 {
+            margin-bottom: 2rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        h1 span {
+            font-size: 2rem;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+        
+        .card {
+            background: var(--card-bg);
+            border-radius: 12px;
+            padding: 1.5rem;
+        }
+        
+        .card h2 {
+            font-size: 1rem;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 1rem;
+        }
+        
+        .stat {
+            font-size: 3rem;
+            font-weight: bold;
+        }
+        
+        .stat.warning { color: var(--warning); }
+        .stat.success { color: var(--success); }
+        .stat.accent { color: var(--accent); }
+        
+        .stat-label {
+            color: var(--text-dim);
+            margin-top: 0.5rem;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        th, td {
+            text-align: left;
+            padding: 0.75rem;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        
+        th {
+            color: var(--text-dim);
+            font-weight: 500;
+            text-transform: uppercase;
+            font-size: 0.75rem;
+            letter-spacing: 0.05em;
+        }
+        
+        tr:hover {
+            background: rgba(255,255,255,0.05);
+        }
+        
+        .status-badge {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+        
+        .status-pending { background: var(--warning); color: #000; }
+        .status-acted { background: var(--success); color: #000; }
+        .status-dismissed { background: var(--text-dim); color: #000; }
+        .status-open { background: var(--accent); }
+        .status-resolved { background: var(--success); color: #000; }
+        
+        .loading {
+            text-align: center;
+            color: var(--text-dim);
+            padding: 2rem;
+        }
+        
+        .error {
+            background: rgba(233, 69, 96, 0.2);
+            border: 1px solid var(--accent);
+            padding: 1rem;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+        }
+        
+        .refresh-btn {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            float: right;
+        }
+        
+        .refresh-btn:hover {
+            opacity: 0.9;
+        }
+        
+        .timestamp {
+            color: var(--text-dim);
+            font-size: 0.85rem;
+        }
+        
+        a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+        
+        a:hover {
+            text-decoration: underline;
+        }
+        
+        .section {
+            margin-bottom: 2rem;
+        }
+        
+        .section h2 {
+            margin-bottom: 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+    </style>
+</head>
+<body>
+    <h1><span>👁️</span> Argus Dashboard</h1>
+    
+    <div id="error" class="error" style="display: none;"></div>
+    
+    <div class="grid" id="stats">
+        <div class="card">
+            <h2>Pending Notifications</h2>
+            <div class="stat warning" id="pending-count">-</div>
+            <div class="stat-label">Awaiting action</div>
+        </div>
+        <div class="card">
+            <h2>Activity (24h)</h2>
+            <div class="stat success" id="activity-count">-</div>
+            <div class="stat-label">Actions logged</div>
+        </div>
+        <div class="card">
+            <h2>Open Escalations</h2>
+            <div class="stat accent" id="escalation-count">-</div>
+            <div class="stat-label">Need attention</div>
+        </div>
+    </div>
+    
+    <div class="section">
+        <div class="card">
+            <h2>
+                Recent Notifications
+                <button class="refresh-btn" onclick="loadData()">↻ Refresh</button>
+            </h2>
+            <div id="notifications-table">
+                <div class="loading">Loading...</div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="section">
+        <div class="card">
+            <h2>Recent Activity</h2>
+            <div id="activity-table">
+                <div class="loading">Loading...</div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="section">
+        <div class="card">
+            <h2>Open Escalations</h2>
+            <div id="escalations-table">
+                <div class="loading">Loading...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8100';
+        
+        async function fetchData(table, sql) {
+            const url = `${API_BASE}/argus.json?sql=${encodeURIComponent(sql)}&_shape=array`;
+            const resp = await fetch(url);
+            if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+            return await resp.json();
+        }
+        
+        function formatDate(iso) {
+            if (!iso) return '-';
+            const d = new Date(iso);
+            return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+        }
+        
+        function getNotificationStatus(row) {
+            if (row.dismissed) return { class: 'status-dismissed', text: 'Dismissed' };
+            if (row.acted_at) return { class: 'status-acted', text: 'Acted' };
+            return { class: 'status-pending', text: 'Pending' };
+        }
+        
+        async function loadData() {
+            const errorEl = document.getElementById('error');
+            errorEl.style.display = 'none';
+            
+            try {
+                // Stats
+                const pending = await fetchData('notifications', 
+                    'SELECT COUNT(*) as c FROM notifications WHERE dismissed = 0 AND acted_at IS NULL');
+                document.getElementById('pending-count').textContent = pending[0]?.c || 0;
+                
+                const yesterday = new Date(Date.now() - 86400000).toISOString();
+                const activity = await fetchData('activity_log',
+                    `SELECT COUNT(*) as c FROM activity_log WHERE timestamp > '${yesterday}'`);
+                document.getElementById('activity-count').textContent = activity[0]?.c || 0;
+                
+                const escalations = await fetchData('escalations',
+                    "SELECT COUNT(*) as c FROM escalations WHERE status = 'open'");
+                document.getElementById('escalation-count').textContent = escalations[0]?.c || 0;
+                
+                // Notifications table
+                const notifications = await fetchData('notifications',
+                    'SELECT * FROM notifications ORDER BY seen_at DESC LIMIT 10');
+                
+                if (notifications.length === 0) {
+                    document.getElementById('notifications-table').innerHTML = 
+                        '<div class="loading">No notifications yet.</div>';
+                } else {
+                    let html = `<table>
+                        <thead><tr><th>Status</th><th>Title</th><th>Repo</th><th>Seen</th></tr></thead>
+                        <tbody>`;
+                    for (const n of notifications) {
+                        const status = getNotificationStatus(n);
+                        const title = n.url ? `<a href="${n.url}" target="_blank">${n.title}</a>` : n.title;
+                        html += `<tr>
+                            <td><span class="status-badge ${status.class}">${status.text}</span></td>
+                            <td>${title}</td>
+                            <td>${n.repo_id || '-'}</td>
+                            <td class="timestamp">${formatDate(n.seen_at)}</td>
+                        </tr>`;
+                    }
+                    html += '</tbody></table>';
+                    document.getElementById('notifications-table').innerHTML = html;
+                }
+                
+                // Activity table
+                const activityLog = await fetchData('activity_log',
+                    'SELECT * FROM activity_log ORDER BY timestamp DESC LIMIT 10');
+                
+                if (activityLog.length === 0) {
+                    document.getElementById('activity-table').innerHTML = 
+                        '<div class="loading">No activity yet.</div>';
+                } else {
+                    let html = `<table>
+                        <thead><tr><th>Time</th><th>Action</th><th>Detail</th></tr></thead>
+                        <tbody>`;
+                    for (const a of activityLog) {
+                        const detail = a.github_url ? 
+                            `<a href="${a.github_url}" target="_blank">${a.detail || '-'}</a>` : 
+                            (a.detail || '-');
+                        html += `<tr>
+                            <td class="timestamp">${formatDate(a.timestamp)}</td>
+                            <td>${a.action}</td>
+                            <td>${detail}</td>
+                        </tr>`;
+                    }
+                    html += '</tbody></table>';
+                    document.getElementById('activity-table').innerHTML = html;
+                }
+                
+                // Escalations table
+                const escList = await fetchData('escalations',
+                    "SELECT * FROM escalations WHERE status = 'open' ORDER BY created_at DESC LIMIT 10");
+                
+                if (escList.length === 0) {
+                    document.getElementById('escalations-table').innerHTML = 
+                        '<div class="loading">No open escalations. ✨</div>';
+                } else {
+                    let html = `<table>
+                        <thead><tr><th>ID</th><th>Category</th><th>Title</th><th>Created</th></tr></thead>
+                        <tbody>`;
+                    for (const e of escList) {
+                        html += `<tr>
+                            <td>#${e.id}</td>
+                            <td>${e.category}</td>
+                            <td>${e.title}</td>
+                            <td class="timestamp">${formatDate(e.created_at)}</td>
+                        </tr>`;
+                    }
+                    html += '</tbody></table>';
+                    document.getElementById('escalations-table').innerHTML = html;
+                }
+                
+            } catch (err) {
+                errorEl.textContent = `Failed to load data: ${err.message}. Is the Datasette server running on port 8100?`;
+                errorEl.style.display = 'block';
+            }
+        }
+        
+        // Load on page load
+        loadData();
+        
+        // Auto-refresh every 60 seconds
+        setInterval(loadData, 60000);
+    </script>
+</body>
+</html>

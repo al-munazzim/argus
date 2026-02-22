@@ -1,0 +1,635 @@
+#!/usr/bin/env python3
+"""
+Argus - CLI tool for GitHub/Forgejo community awareness.
+
+Named after Argus Panoptes, the all-seeing giant of Greek mythology.
+"""
+
+import argparse
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+VERSION = "0.1.0"
+DEFAULT_DB_PATH = Path.home() / ".argus" / "argus.db"
+DEFAULT_PORT = 8100
+DEFAULT_DASHBOARD_PORT = 8101
+
+def get_db_path() -> Path:
+    return Path(os.environ.get("ARGUS_DB", DEFAULT_DB_PATH))
+
+def get_schema_path() -> Path:
+    # Check relative to script first (for development)
+    script_dir = Path(__file__).parent.parent
+    schema_path = script_dir / "lib" / "schema.sql"
+    if schema_path.exists():
+        return schema_path
+    # Fall back to installed location
+    return Path("/opt/argus/lib/schema.sql")
+
+def get_dashboard_path() -> Path:
+    script_dir = Path(__file__).parent.parent
+    dashboard_path = script_dir / "dashboard" / "index.html"
+    if dashboard_path.exists():
+        return dashboard_path
+    return Path("/opt/argus/dashboard/index.html")
+
+# ============================================================================
+# Database
+# ============================================================================
+
+def get_db() -> sqlite3.Connection:
+    db_path = get_db_path()
+    if not db_path.exists():
+        print(f"Error: Database not found at {db_path}", file=sys.stderr)
+        print("Run 'argus init' first.", file=sys.stderr)
+        sys.exit(1)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db() -> None:
+    db_path = get_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    schema_path = get_schema_path()
+    if not schema_path.exists():
+        print(f"Error: Schema not found at {schema_path}", file=sys.stderr)
+        sys.exit(1)
+    
+    conn = sqlite3.connect(db_path)
+    with open(schema_path) as f:
+        conn.executescript(f.read())
+    conn.close()
+    print(f"✓ Initialized database at {db_path}")
+
+# ============================================================================
+# GitHub API
+# ============================================================================
+
+def get_gh_token() -> Optional[str]:
+    return os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+
+def gh_api(endpoint: str) -> dict:
+    """Call GitHub API via gh CLI."""
+    try:
+        result = subprocess.run(
+            ["gh", "api", endpoint],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        return json.loads(result.stdout)
+    except subprocess.CalledProcessError as e:
+        print(f"Error calling GitHub API: {e.stderr}", file=sys.stderr)
+        sys.exit(1)
+    except json.JSONDecodeError:
+        print(f"Error parsing GitHub API response", file=sys.stderr)
+        sys.exit(1)
+
+# ============================================================================
+# Commands: Core
+# ============================================================================
+
+def cmd_init(args) -> None:
+    """Initialize database."""
+    init_db()
+
+def cmd_version(args) -> None:
+    """Show version."""
+    print(f"argus {VERSION}")
+
+def cmd_status(args) -> None:
+    """Show status summary."""
+    conn = get_db()
+    
+    # Pending notifications
+    pending = conn.execute(
+        "SELECT COUNT(*) FROM notifications WHERE dismissed = 0 AND acted_at IS NULL"
+    ).fetchone()[0]
+    
+    # Recent activity (last 24h)
+    yesterday = (datetime.now() - timedelta(days=1)).isoformat()
+    recent_activity = conn.execute(
+        "SELECT COUNT(*) FROM activity_log WHERE timestamp > ?",
+        (yesterday,)
+    ).fetchone()[0]
+    
+    # Open escalations
+    open_escalations = conn.execute(
+        "SELECT COUNT(*) FROM escalations WHERE status = 'open'"
+    ).fetchone()[0]
+    
+    # Last poll
+    last_poll = conn.execute(
+        "SELECT polled_at, new_count FROM notification_polls ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    
+    print("=" * 50)
+    print("ARGUS STATUS")
+    print("=" * 50)
+    print(f"Pending notifications:  {pending}")
+    print(f"Activity (24h):         {recent_activity}")
+    print(f"Open escalations:       {open_escalations}")
+    if last_poll:
+        print(f"Last poll:              {last_poll['polled_at']} ({last_poll['new_count']} new)")
+    else:
+        print("Last poll:              Never")
+    print("=" * 50)
+    
+    conn.close()
+
+# ============================================================================
+# Commands: Notifications
+# ============================================================================
+
+def cmd_notif_pull(args) -> None:
+    """Pull notifications from GitHub."""
+    conn = get_db()
+    
+    # Fetch notifications from GitHub
+    notifications = gh_api("notifications")
+    
+    new_count = 0
+    for notif in notifications:
+        notif_id = notif["id"]
+        
+        # Check if already exists
+        existing = conn.execute(
+            "SELECT id FROM notifications WHERE id = ?",
+            (notif_id,)
+        ).fetchone()
+        
+        if existing:
+            continue
+        
+        # Extract repo info
+        repo_full = notif["repository"]["full_name"]
+        reason = notif["reason"]
+        title = notif["subject"]["title"]
+        url = notif["subject"]["url"] or ""
+        
+        # Convert API URL to web URL
+        web_url = url.replace("api.github.com/repos", "github.com")
+        web_url = web_url.replace("/pulls/", "/pull/")
+        
+        if args.dry_run:
+            print(f"[DRY-RUN] Would add: {title} ({reason})")
+            new_count += 1
+            continue
+        
+        conn.execute("""
+            INSERT INTO notifications (id, repo_id, reason, title, url, seen_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (notif_id, repo_full, reason, title, web_url, datetime.now().isoformat()))
+        new_count += 1
+    
+    if not args.dry_run:
+        # Record poll
+        conn.execute(
+            "INSERT INTO notification_polls (new_count) VALUES (?)",
+            (new_count,)
+        )
+        conn.commit()
+    
+    conn.close()
+    
+    if args.dry_run:
+        print(f"\n[DRY-RUN] Would add {new_count} notifications")
+    else:
+        print(f"✓ Pulled {new_count} new notifications")
+
+def cmd_notif_list(args) -> None:
+    """List notifications."""
+    conn = get_db()
+    
+    query = "SELECT * FROM notifications"
+    conditions = []
+    params = []
+    
+    if args.pending:
+        conditions.append("dismissed = 0 AND acted_at IS NULL")
+    
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    
+    query += " ORDER BY seen_at DESC"
+    
+    if args.limit:
+        query += f" LIMIT {args.limit}"
+    
+    notifications = conn.execute(query, params).fetchall()
+    
+    if not notifications:
+        print("No notifications found.")
+        return
+    
+    for n in notifications:
+        status = "✓" if n["acted_at"] else ("✗" if n["dismissed"] else "○")
+        print(f"{status} [{n['id'][:8]}] {n['title'][:60]}")
+        print(f"   Repo: {n['repo_id']} | Reason: {n['reason']}")
+        if n["url"]:
+            print(f"   URL: {n['url']}")
+        print()
+    
+    conn.close()
+
+def cmd_notif_act(args) -> None:
+    """Mark notification as acted on."""
+    conn = get_db()
+    
+    # Find notification by prefix match
+    notif = conn.execute(
+        "SELECT * FROM notifications WHERE id LIKE ?",
+        (f"{args.id}%",)
+    ).fetchone()
+    
+    if not notif:
+        print(f"Error: Notification not found: {args.id}", file=sys.stderr)
+        sys.exit(1)
+    
+    action = args.action
+    detail = args.detail or ""
+    
+    conn.execute("""
+        UPDATE notifications 
+        SET acted_at = ?, action_taken = ?
+        WHERE id = ?
+    """, (datetime.now().isoformat(), f"{action}: {detail}".strip(": "), notif["id"]))
+    
+    # Log the activity
+    conn.execute("""
+        INSERT INTO activity_log (issue_id, action, detail, github_url)
+        VALUES (?, ?, ?, ?)
+    """, (notif.get("issue_id"), action, detail or notif["title"], notif.get("url")))
+    
+    conn.commit()
+    conn.close()
+    
+    print(f"✓ Marked notification as acted: {action}")
+
+def cmd_notif_dismiss(args) -> None:
+    """Dismiss notification."""
+    conn = get_db()
+    
+    # Find notification by prefix match
+    notif = conn.execute(
+        "SELECT * FROM notifications WHERE id LIKE ?",
+        (f"{args.id}%",)
+    ).fetchone()
+    
+    if not notif:
+        print(f"Error: Notification not found: {args.id}", file=sys.stderr)
+        sys.exit(1)
+    
+    reason = args.reason or "dismissed"
+    
+    conn.execute("""
+        UPDATE notifications 
+        SET dismissed = 1, action_taken = ?
+        WHERE id = ?
+    """, (f"dismissed: {reason}", notif["id"]))
+    
+    conn.commit()
+    conn.close()
+    
+    print(f"✓ Dismissed notification: {reason}")
+
+def cmd_notif_audit(args) -> None:
+    """Audit stale notifications and create escalations."""
+    conn = get_db()
+    
+    stale_hours = args.stale_hours or 48
+    cutoff = (datetime.now() - timedelta(hours=stale_hours)).isoformat()
+    
+    stale = conn.execute("""
+        SELECT * FROM notifications 
+        WHERE dismissed = 0 AND acted_at IS NULL AND seen_at < ?
+    """, (cutoff,)).fetchall()
+    
+    if not stale:
+        print("✓ No stale notifications found")
+        return
+    
+    print(f"Found {len(stale)} stale notifications (>{stale_hours}h):")
+    
+    for n in stale:
+        print(f"  - {n['title'][:50]}...")
+        
+        # Create escalation
+        conn.execute("""
+            INSERT INTO escalations (category, title, detail)
+            VALUES (?, ?, ?)
+        """, (
+            "stale-notification",
+            f"Stale: {n['title'][:100]}",
+            f"Notification {n['id']} has been pending for >{stale_hours}h.\nURL: {n.get('url', 'N/A')}"
+        ))
+    
+    conn.commit()
+    conn.close()
+    
+    print(f"\n✓ Created {len(stale)} escalations")
+
+# ============================================================================
+# Commands: Activity
+# ============================================================================
+
+def cmd_activity_log(args) -> None:
+    """Log an activity."""
+    conn = get_db()
+    
+    conn.execute("""
+        INSERT INTO activity_log (issue_id, action, detail)
+        VALUES (?, ?, ?)
+    """, (args.issue, args.action, args.detail))
+    
+    conn.commit()
+    conn.close()
+    
+    print(f"✓ Logged: {args.action}")
+
+def cmd_activity_list(args) -> None:
+    """List recent activity."""
+    conn = get_db()
+    
+    limit = args.limit or 20
+    
+    activities = conn.execute("""
+        SELECT * FROM activity_log 
+        ORDER BY timestamp DESC 
+        LIMIT ?
+    """, (limit,)).fetchall()
+    
+    if not activities:
+        print("No activity found.")
+        return
+    
+    for a in activities:
+        ts = a["timestamp"][:16].replace("T", " ")
+        issue = f"[{a['issue_id']}] " if a["issue_id"] else ""
+        print(f"{ts} | {issue}{a['action']}: {a['detail'] or ''}")
+    
+    conn.close()
+
+# ============================================================================
+# Commands: Escalations
+# ============================================================================
+
+def cmd_escalate_create(args) -> None:
+    """Create an escalation."""
+    conn = get_db()
+    
+    conn.execute("""
+        INSERT INTO escalations (category, priority, title, detail)
+        VALUES (?, ?, ?, ?)
+    """, (args.category, args.priority or "normal", args.title, args.detail))
+    
+    conn.commit()
+    conn.close()
+    
+    print(f"✓ Created escalation: {args.title}")
+
+def cmd_escalate_list(args) -> None:
+    """List escalations."""
+    conn = get_db()
+    
+    query = "SELECT * FROM escalations"
+    params = []
+    
+    if args.status:
+        query += " WHERE status = ?"
+        params.append(args.status)
+    
+    query += " ORDER BY created_at DESC"
+    
+    escalations = conn.execute(query, params).fetchall()
+    
+    if not escalations:
+        print("No escalations found.")
+        return
+    
+    for e in escalations:
+        status_icon = "🔴" if e["status"] == "open" else "✅"
+        priority_icon = "⚠️" if e["priority"] == "high" else ""
+        print(f"{status_icon} [{e['id']}] {priority_icon}{e['title']}")
+        print(f"   Category: {e['category']} | Created: {e['created_at'][:10]}")
+        if e["status"] == "resolved":
+            print(f"   Resolved by: {e['resolved_by']} | {e['resolution']}")
+        print()
+    
+    conn.close()
+
+def cmd_escalate_ack(args) -> None:
+    """Acknowledge an escalation."""
+    conn = get_db()
+    
+    conn.execute("""
+        UPDATE escalations 
+        SET status = 'acknowledged'
+        WHERE id = ?
+    """, (args.id,))
+    
+    if conn.total_changes == 0:
+        print(f"Error: Escalation not found: {args.id}", file=sys.stderr)
+        sys.exit(1)
+    
+    conn.commit()
+    conn.close()
+    
+    print(f"✓ Acknowledged escalation #{args.id}")
+
+def cmd_escalate_resolve(args) -> None:
+    """Resolve an escalation."""
+    conn = get_db()
+    
+    conn.execute("""
+        UPDATE escalations 
+        SET status = 'resolved', resolved_at = ?, resolved_by = ?, resolution = ?
+        WHERE id = ?
+    """, (datetime.now().isoformat(), args.by, args.resolution, args.id))
+    
+    if conn.total_changes == 0:
+        print(f"Error: Escalation not found: {args.id}", file=sys.stderr)
+        sys.exit(1)
+    
+    conn.commit()
+    conn.close()
+    
+    print(f"✓ Resolved escalation #{args.id}")
+
+# ============================================================================
+# Commands: Serve
+# ============================================================================
+
+def cmd_serve(args) -> None:
+    """Start datasette + dashboard servers."""
+    import http.server
+    import threading
+    
+    db_path = get_db_path()
+    dashboard_path = get_dashboard_path()
+    
+    port = args.port or int(os.environ.get("ARGUS_PORT", DEFAULT_PORT))
+    dashboard_port = args.dashboard_port or int(os.environ.get("ARGUS_DASHBOARD_PORT", DEFAULT_DASHBOARD_PORT))
+    
+    print(f"Starting Argus servers...")
+    print(f"  Datasette:  http://localhost:{port}")
+    print(f"  Dashboard:  http://localhost:{dashboard_port}")
+    print()
+    
+    # Start datasette in background
+    datasette_proc = subprocess.Popen(
+        ["datasette", str(db_path), "-p", str(port), "--cors"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+    
+    # Start simple HTTP server for dashboard
+    os.chdir(dashboard_path.parent)
+    
+    handler = http.server.SimpleHTTPRequestHandler
+    with http.server.HTTPServer(("", dashboard_port), handler) as httpd:
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\nShutting down...")
+            datasette_proc.terminate()
+
+# ============================================================================
+# Main
+# ============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="argus",
+        description="CLI tool for GitHub/Forgejo community awareness"
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+    
+    # Core commands
+    subparsers.add_parser("init", help="Initialize database")
+    subparsers.add_parser("version", help="Show version")
+    subparsers.add_parser("status", help="Show status summary")
+    
+    # Notification commands
+    notif_parser = subparsers.add_parser("notif", help="Notification management")
+    notif_sub = notif_parser.add_subparsers(dest="notif_cmd")
+    
+    pull_parser = notif_sub.add_parser("pull", help="Pull notifications from GitHub")
+    pull_parser.add_argument("--dry-run", action="store_true", help="Show what would be pulled")
+    
+    list_parser = notif_sub.add_parser("list", help="List notifications")
+    list_parser.add_argument("--pending", action="store_true", help="Show only pending")
+    list_parser.add_argument("--limit", type=int, help="Limit results")
+    
+    act_parser = notif_sub.add_parser("act", help="Mark as acted on")
+    act_parser.add_argument("id", help="Notification ID (prefix match)")
+    act_parser.add_argument("action", help="Action taken")
+    act_parser.add_argument("detail", nargs="?", help="Additional detail")
+    
+    dismiss_parser = notif_sub.add_parser("dismiss", help="Dismiss notification")
+    dismiss_parser.add_argument("id", help="Notification ID (prefix match)")
+    dismiss_parser.add_argument("reason", nargs="?", help="Dismissal reason")
+    
+    audit_parser = notif_sub.add_parser("audit", help="Audit stale notifications")
+    audit_parser.add_argument("--stale-hours", type=int, help="Hours to consider stale (default: 48)")
+    
+    # Activity commands
+    activity_parser = subparsers.add_parser("activity", help="Activity logging")
+    activity_sub = activity_parser.add_subparsers(dest="activity_cmd")
+    
+    log_parser = activity_sub.add_parser("log", help="Log an activity")
+    log_parser.add_argument("action", help="Action type")
+    log_parser.add_argument("detail", help="Action detail")
+    log_parser.add_argument("--issue", help="Related issue ID")
+    
+    list_activity_parser = activity_sub.add_parser("list", help="List recent activity")
+    list_activity_parser.add_argument("--limit", type=int, help="Limit results")
+    
+    # Escalation commands
+    escalate_parser = subparsers.add_parser("escalate", help="Escalation management")
+    escalate_sub = escalate_parser.add_subparsers(dest="escalate_cmd")
+    
+    create_parser = escalate_sub.add_parser("create", help="Create escalation")
+    create_parser.add_argument("--category", required=True, help="Escalation category")
+    create_parser.add_argument("--title", required=True, help="Escalation title")
+    create_parser.add_argument("--detail", help="Additional detail")
+    create_parser.add_argument("--priority", choices=["low", "normal", "high"], help="Priority")
+    
+    list_esc_parser = escalate_sub.add_parser("list", help="List escalations")
+    list_esc_parser.add_argument("--status", choices=["open", "acknowledged", "resolved"], help="Filter by status")
+    
+    ack_parser = escalate_sub.add_parser("ack", help="Acknowledge escalation")
+    ack_parser.add_argument("id", type=int, help="Escalation ID")
+    
+    resolve_parser = escalate_sub.add_parser("resolve", help="Resolve escalation")
+    resolve_parser.add_argument("id", type=int, help="Escalation ID")
+    resolve_parser.add_argument("--by", required=True, help="Who resolved")
+    resolve_parser.add_argument("--resolution", required=True, help="Resolution description")
+    
+    # Serve command
+    serve_parser = subparsers.add_parser("serve", help="Start servers")
+    serve_parser.add_argument("--port", type=int, help=f"Datasette port (default: {DEFAULT_PORT})")
+    serve_parser.add_argument("--dashboard-port", type=int, help=f"Dashboard port (default: {DEFAULT_DASHBOARD_PORT})")
+    
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
+        sys.exit(0)
+    
+    # Route to command handlers
+    if args.command == "init":
+        cmd_init(args)
+    elif args.command == "version":
+        cmd_version(args)
+    elif args.command == "status":
+        cmd_status(args)
+    elif args.command == "notif":
+        if args.notif_cmd == "pull":
+            cmd_notif_pull(args)
+        elif args.notif_cmd == "list":
+            cmd_notif_list(args)
+        elif args.notif_cmd == "act":
+            cmd_notif_act(args)
+        elif args.notif_cmd == "dismiss":
+            cmd_notif_dismiss(args)
+        elif args.notif_cmd == "audit":
+            cmd_notif_audit(args)
+        else:
+            notif_parser.print_help()
+    elif args.command == "activity":
+        if args.activity_cmd == "log":
+            cmd_activity_log(args)
+        elif args.activity_cmd == "list":
+            cmd_activity_list(args)
+        else:
+            activity_parser.print_help()
+    elif args.command == "escalate":
+        if args.escalate_cmd == "create":
+            cmd_escalate_create(args)
+        elif args.escalate_cmd == "list":
+            cmd_escalate_list(args)
+        elif args.escalate_cmd == "ack":
+            cmd_escalate_ack(args)
+        elif args.escalate_cmd == "resolve":
+            cmd_escalate_resolve(args)
+        else:
+            escalate_parser.print_help()
+    elif args.command == "serve":
+        cmd_serve(args)
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
