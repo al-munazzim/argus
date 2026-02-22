@@ -64,6 +64,14 @@ The install script outputs this block — just copy it to your HEARTBEAT.md.
 | `argus version` | Show version |
 | `argus status` | Summary overview |
 
+### Repositories
+
+| Command | Description |
+|---------|-------------|
+| `argus repo list` | List watched repositories |
+| `argus repo watch <owner/repo>` | Subscribe to a repository |
+| `argus repo unwatch <owner/repo>` | Unsubscribe from a repository |
+
 ### Notifications
 
 | Command | Description |

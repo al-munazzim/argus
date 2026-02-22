@@ -32,6 +32,14 @@ argus version           # Show version
 argus status            # Summary: pending, activity, escalations
 ```
 
+### Repositories
+
+```bash
+argus repo list                    # List watched repos
+argus repo watch <owner/repo>      # Subscribe to repo
+argus repo unwatch <owner/repo>    # Unsubscribe from repo
+```
+
 ### Notifications
 
 ```bash

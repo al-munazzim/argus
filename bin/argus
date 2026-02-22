@@ -19,7 +19,7 @@ from typing import Optional
 # Configuration
 # ============================================================================
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 DEFAULT_DB_PATH = Path.home() / ".argus" / "argus.db"
 DEFAULT_PORT = 8100  # Dashboard port; datasette runs on port+1
 
@@ -196,6 +196,153 @@ def fetch_notifications(backend: str) -> list:
         sys.exit(1)
 
 # ============================================================================
+# Repo Watching
+# ============================================================================
+
+def gh_list_watched() -> list:
+    """List watched repos via gh CLI."""
+    repos = gh_api("user/subscriptions?per_page=100")
+    return [r["full_name"] for r in repos]
+
+def gh_watch_repo(repo: str) -> bool:
+    """Watch a repo via gh CLI."""
+    try:
+        subprocess.run(
+            ["gh", "api", "-X", "PUT", f"repos/{repo}/subscription", 
+             "-f", "subscribed=true"],
+            capture_output=True, check=True
+        )
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+def gh_unwatch_repo(repo: str) -> bool:
+    """Unwatch a repo via gh CLI."""
+    try:
+        subprocess.run(
+            ["gh", "api", "-X", "DELETE", f"repos/{repo}/subscription"],
+            capture_output=True, check=True
+        )
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+def tea_list_watched() -> list:
+    """List watched repos via Forgejo API."""
+    # tea doesn't have a direct command, use API
+    try:
+        result = subprocess.run(
+            ["tea", "api", "GET", "user/subscriptions"],
+            capture_output=True, text=True, check=True
+        )
+        import json
+        repos = json.loads(result.stdout)
+        return [r["full_name"] for r in repos]
+    except:
+        # Fallback: try curl with token from tea config
+        return tea_list_watched_api()
+
+def tea_list_watched_api() -> list:
+    """List watched repos via direct API call."""
+    import yaml
+    config_path = Path.home() / ".config" / "tea" / "config.yml"
+    if not config_path.exists():
+        return []
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    login = config.get("logins", [{}])[0]
+    token = login.get("token", "")
+    url = login.get("url", "")
+    if not token or not url:
+        return []
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            f"{url}/api/v1/user/subscriptions",
+            headers={"Authorization": f"token {token}"}
+        )
+        with urllib.request.urlopen(req) as resp:
+            import json
+            repos = json.loads(resp.read())
+            return [r["full_name"] for r in repos]
+    except:
+        return []
+
+def tea_watch_repo(repo: str) -> bool:
+    """Watch a repo via Forgejo API."""
+    import yaml
+    config_path = Path.home() / ".config" / "tea" / "config.yml"
+    if not config_path.exists():
+        return False
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    login = config.get("logins", [{}])[0]
+    token = login.get("token", "")
+    url = login.get("url", "")
+    if not token or not url:
+        return False
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            f"{url}/api/v1/repos/{repo}/subscription",
+            method="PUT",
+            headers={"Authorization": f"token {token}"}
+        )
+        urllib.request.urlopen(req)
+        return True
+    except:
+        return False
+
+def tea_unwatch_repo(repo: str) -> bool:
+    """Unwatch a repo via Forgejo API."""
+    import yaml
+    config_path = Path.home() / ".config" / "tea" / "config.yml"
+    if not config_path.exists():
+        return False
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    login = config.get("logins", [{}])[0]
+    token = login.get("token", "")
+    url = login.get("url", "")
+    if not token or not url:
+        return False
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            f"{url}/api/v1/repos/{repo}/subscription",
+            method="DELETE",
+            headers={"Authorization": f"token {token}"}
+        )
+        urllib.request.urlopen(req)
+        return True
+    except:
+        return False
+
+def list_watched_repos(backend: str) -> list:
+    """List watched repos using the specified backend."""
+    if backend == "gh":
+        return gh_list_watched()
+    elif backend == "tea":
+        return tea_list_watched()
+    return []
+
+def watch_repo(backend: str, repo: str) -> bool:
+    """Watch a repo using the specified backend."""
+    if backend == "gh":
+        return gh_watch_repo(repo)
+    elif backend == "tea":
+        return tea_watch_repo(repo)
+    return False
+
+def unwatch_repo(backend: str, repo: str) -> bool:
+    """Unwatch a repo using the specified backend."""
+    if backend == "gh":
+        return gh_unwatch_repo(repo)
+    elif backend == "tea":
+        return tea_unwatch_repo(repo)
+    return False
+
+# ============================================================================
 # Commands: Core
 # ============================================================================
 
@@ -246,6 +393,55 @@ def cmd_status(args) -> None:
     print("=" * 50)
     
     conn.close()
+
+# ============================================================================
+# Commands: Repos
+# ============================================================================
+
+def cmd_repo_list(args) -> None:
+    """List watched repositories."""
+    backend = getattr(args, 'backend', None) or get_backend()
+    
+    repos = list_watched_repos(backend)
+    
+    if not repos:
+        print(f"No watched repositories (backend: {backend})")
+        return
+    
+    print(f"Watched repositories ({backend}):")
+    for repo in sorted(repos):
+        print(f"  • {repo}")
+    print(f"\nTotal: {len(repos)}")
+
+def cmd_repo_watch(args) -> None:
+    """Watch a repository."""
+    backend = getattr(args, 'backend', None) or get_backend()
+    repo = args.repo
+    
+    if "/" not in repo:
+        print(f"Error: Invalid repo format. Use 'owner/repo'.", file=sys.stderr)
+        sys.exit(1)
+    
+    if watch_repo(backend, repo):
+        print(f"✓ Now watching: {repo}")
+    else:
+        print(f"✗ Failed to watch: {repo}", file=sys.stderr)
+        sys.exit(1)
+
+def cmd_repo_unwatch(args) -> None:
+    """Unwatch a repository."""
+    backend = getattr(args, 'backend', None) or get_backend()
+    repo = args.repo
+    
+    if "/" not in repo:
+        print(f"Error: Invalid repo format. Use 'owner/repo'.", file=sys.stderr)
+        sys.exit(1)
+    
+    if unwatch_repo(backend, repo):
+        print(f"✓ Unwatched: {repo}")
+    else:
+        print(f"✗ Failed to unwatch: {repo}", file=sys.stderr)
+        sys.exit(1)
 
 # ============================================================================
 # Commands: Notifications
@@ -631,6 +827,21 @@ def main():
     subparsers.add_parser("version", help="Show version")
     subparsers.add_parser("status", help="Show status summary")
     
+    # Repo commands
+    repo_parser = subparsers.add_parser("repo", help="Repository watching")
+    repo_sub = repo_parser.add_subparsers(dest="repo_cmd")
+    
+    repo_list_parser = repo_sub.add_parser("list", help="List watched repositories")
+    repo_list_parser.add_argument("--backend", choices=["gh", "tea"], help="Backend: gh (GitHub) or tea (Forgejo)")
+    
+    repo_watch_parser = repo_sub.add_parser("watch", help="Watch a repository")
+    repo_watch_parser.add_argument("repo", help="Repository (owner/repo)")
+    repo_watch_parser.add_argument("--backend", choices=["gh", "tea"], help="Backend: gh (GitHub) or tea (Forgejo)")
+    
+    repo_unwatch_parser = repo_sub.add_parser("unwatch", help="Unwatch a repository")
+    repo_unwatch_parser.add_argument("repo", help="Repository (owner/repo)")
+    repo_unwatch_parser.add_argument("--backend", choices=["gh", "tea"], help="Backend: gh (GitHub) or tea (Forgejo)")
+    
     # Notification commands
     notif_parser = subparsers.add_parser("notif", help="Notification management")
     notif_sub = notif_parser.add_subparsers(dest="notif_cmd")
@@ -705,6 +916,15 @@ def main():
         cmd_version(args)
     elif args.command == "status":
         cmd_status(args)
+    elif args.command == "repo":
+        if args.repo_cmd == "list":
+            cmd_repo_list(args)
+        elif args.repo_cmd == "watch":
+            cmd_repo_watch(args)
+        elif args.repo_cmd == "unwatch":
+            cmd_repo_unwatch(args)
+        else:
+            repo_parser.print_help()
     elif args.command == "notif":
         if args.notif_cmd == "pull":
             cmd_notif_pull(args)
