@@ -35,11 +35,11 @@ argus status            # Summary: pending, activity, escalations
 ### Notifications
 
 ```bash
-argus notif pull [--dry-run]       # Fetch from GitHub API
-argus notif list [--pending]       # List notifications
-argus notif act <id> <action>      # Mark as acted
-argus notif dismiss <id> [reason]  # Dismiss
-argus notif audit [--stale-hours]  # Auto-escalate stale
+argus notif pull [--backend gh|tea] [--dry-run]  # Fetch notifications
+argus notif list [--pending]                      # List notifications
+argus notif act <id> <action>                     # Mark as acted
+argus notif dismiss <id> [reason]                 # Dismiss
+argus notif audit [--stale-hours]                 # Auto-escalate stale
 ```
 
 ### Activity Logging
@@ -70,7 +70,8 @@ argus serve [--port 8100] [--dashboard-port 8101]
 |----------|---------|-------------|
 | `ARGUS_DB` | `~/.argus/argus.db` | Database path |
 | `ARGUS_PORT` | `8100` | Dashboard port (datasette on port+1) |
-| `GH_TOKEN` | — | GitHub API token |
+| `ARGUS_BACKEND` | `gh` | Backend: `gh` (GitHub) or `tea` (Forgejo) |
+| `GH_TOKEN` | — | GitHub API token (for gh backend) |
 
 ## Workflow
 

@@ -48,7 +48,7 @@ systemctl start argus
 
 | Command | Description |
 |---------|-------------|
-| `argus notif pull [--dry-run]` | Fetch from GitHub |
+| `argus notif pull [--backend gh\|tea]` | Fetch from GitHub/Forgejo |
 | `argus notif list [--pending]` | List notifications |
 | `argus notif act <id> <action>` | Mark as acted |
 | `argus notif dismiss <id> [reason]` | Dismiss |
@@ -84,7 +84,8 @@ Environment variables:
 |----------|---------|-------------|
 | `ARGUS_DB` | `~/.argus/argus.db` | Database path |
 | `ARGUS_PORT` | `8100` | Dashboard port (datasette runs on port+1) |
-| `GH_TOKEN` | — | GitHub API token |
+| `ARGUS_BACKEND` | `gh` | Backend: `gh` (GitHub) or `tea` (Forgejo) |
+| `GH_TOKEN` | — | GitHub API token (for gh backend) |
 
 ## Architecture
 

@@ -19,7 +19,7 @@ from typing import Optional
 # Configuration
 # ============================================================================
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 DEFAULT_DB_PATH = Path.home() / ".argus" / "argus.db"
 DEFAULT_PORT = 8100  # Dashboard port; datasette runs on port+1
 
@@ -72,11 +72,17 @@ def init_db() -> None:
     print(f"✓ Initialized database at {db_path}")
 
 # ============================================================================
-# GitHub API
+# Backend Configuration
 # ============================================================================
 
-def get_gh_token() -> Optional[str]:
-    return os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+DEFAULT_BACKEND = "gh"  # gh | tea
+
+def get_backend() -> str:
+    return os.environ.get("ARGUS_BACKEND", DEFAULT_BACKEND)
+
+# ============================================================================
+# GitHub API (gh backend)
+# ============================================================================
 
 def gh_api(endpoint: str) -> dict:
     """Call GitHub API via gh CLI."""
@@ -93,6 +99,91 @@ def gh_api(endpoint: str) -> dict:
         sys.exit(1)
     except json.JSONDecodeError:
         print(f"Error parsing GitHub API response", file=sys.stderr)
+        sys.exit(1)
+
+def gh_fetch_notifications() -> list:
+    """Fetch notifications from GitHub."""
+    notifications = gh_api("notifications")
+    results = []
+    for notif in notifications:
+        repo_full = notif["repository"]["full_name"]
+        url = notif["subject"]["url"] or ""
+        # Convert API URL to web URL
+        web_url = url.replace("api.github.com/repos", "github.com")
+        web_url = web_url.replace("/pulls/", "/pull/")
+        
+        results.append({
+            "id": notif["id"],
+            "repo_id": repo_full,
+            "reason": notif["reason"],
+            "title": notif["subject"]["title"],
+            "url": web_url,
+            "type": notif["subject"]["type"].lower(),
+        })
+    return results
+
+# ============================================================================
+# Forgejo API (tea backend)
+# ============================================================================
+
+def tea_cmd(args: list) -> str:
+    """Run tea CLI command and return output."""
+    try:
+        result = subprocess.run(
+            ["tea"] + args,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        return result.stdout
+    except subprocess.CalledProcessError as e:
+        # Filter out the "NOTE: no gitea login" warning
+        stderr = e.stderr.strip()
+        if "token does not have" in stderr:
+            print(f"Error: {stderr}", file=sys.stderr)
+            print("Hint: Your tea token needs 'read:notification' scope.", file=sys.stderr)
+        else:
+            print(f"Error calling tea CLI: {stderr}", file=sys.stderr)
+        sys.exit(1)
+
+def tea_fetch_notifications() -> list:
+    """Fetch notifications from Forgejo via tea CLI."""
+    import yaml
+    
+    output = tea_cmd(["notifications", "list", "--mine", "-o", "yaml"])
+    
+    # Parse YAML output
+    try:
+        notifications = yaml.safe_load(output) or []
+    except:
+        # Fallback: parse line by line if yaml fails
+        notifications = []
+    
+    results = []
+    for notif in notifications:
+        # tea notifications format differs from gh
+        results.append({
+            "id": str(notif.get("id", "")),
+            "repo_id": notif.get("repository", ""),
+            "reason": notif.get("type", "unknown"),
+            "title": notif.get("title", ""),
+            "url": "",  # tea doesn't provide URL directly
+            "type": notif.get("type", "").lower(),
+        })
+    return results
+
+# ============================================================================
+# Unified Backend Interface
+# ============================================================================
+
+def fetch_notifications(backend: str) -> list:
+    """Fetch notifications using the specified backend."""
+    if backend == "gh":
+        return gh_fetch_notifications()
+    elif backend == "tea":
+        return tea_fetch_notifications()
+    else:
+        print(f"Error: Unknown backend '{backend}'. Use 'gh' or 'tea'.", file=sys.stderr)
         sys.exit(1)
 
 # ============================================================================
@@ -152,11 +243,15 @@ def cmd_status(args) -> None:
 # ============================================================================
 
 def cmd_notif_pull(args) -> None:
-    """Pull notifications from GitHub."""
+    """Pull notifications from GitHub/Forgejo."""
     conn = get_db()
     
-    # Fetch notifications from GitHub
-    notifications = gh_api("notifications")
+    # Determine backend
+    backend = getattr(args, 'backend', None) or get_backend()
+    print(f"Using backend: {backend}")
+    
+    # Fetch notifications using the appropriate backend
+    notifications = fetch_notifications(backend)
     
     new_count = 0
     for notif in notifications:
@@ -171,25 +266,16 @@ def cmd_notif_pull(args) -> None:
         if existing:
             continue
         
-        # Extract repo info
-        repo_full = notif["repository"]["full_name"]
-        reason = notif["reason"]
-        title = notif["subject"]["title"]
-        url = notif["subject"]["url"] or ""
-        
-        # Convert API URL to web URL
-        web_url = url.replace("api.github.com/repos", "github.com")
-        web_url = web_url.replace("/pulls/", "/pull/")
-        
         if args.dry_run:
-            print(f"[DRY-RUN] Would add: {title} ({reason})")
+            print(f"[DRY-RUN] Would add: {notif['title']} ({notif['reason']})")
             new_count += 1
             continue
         
         conn.execute("""
             INSERT INTO notifications (id, repo_id, reason, title, url, seen_at)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, (notif_id, repo_full, reason, title, web_url, datetime.now().isoformat()))
+        """, (notif_id, notif["repo_id"], notif["reason"], notif["title"], 
+              notif["url"], datetime.now().isoformat()))
         new_count += 1
     
     if not args.dry_run:
@@ -540,8 +626,9 @@ def main():
     notif_parser = subparsers.add_parser("notif", help="Notification management")
     notif_sub = notif_parser.add_subparsers(dest="notif_cmd")
     
-    pull_parser = notif_sub.add_parser("pull", help="Pull notifications from GitHub")
+    pull_parser = notif_sub.add_parser("pull", help="Pull notifications from GitHub/Forgejo")
     pull_parser.add_argument("--dry-run", action="store_true", help="Show what would be pulled")
+    pull_parser.add_argument("--backend", choices=["gh", "tea"], help="Backend: gh (GitHub) or tea (Forgejo)")
     
     list_parser = notif_sub.add_parser("list", help="List notifications")
     list_parser.add_argument("--pending", action="store_true", help="Show only pending")
