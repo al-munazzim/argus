@@ -21,8 +21,9 @@ Named after **Argus Panoptes**, the all-seeing giant of Greek mythology.
 # Initialize database
 argus init
 
-# Set up GitHub token
-export GH_TOKEN=your_github_token
+# Set up authentication (choose one)
+gh auth login                    # GitHub
+export ARGUS_BACKEND=tea         # Forgejo (needs tea token with read:notification)
 
 # Pull notifications
 argus notif pull
@@ -31,8 +32,27 @@ argus notif pull
 argus status
 
 # Start dashboard
-systemctl start argus
+systemctl enable --now argus
 ```
+
+## Agent Integration
+
+For AI agents using OpenClaw, add this to your `HEARTBEAT.md` for periodic community awareness:
+
+```markdown
+### Argus Community Awareness (Daily)
+1. **Check status**: `argus status`
+2. **Pull notifications**: `argus notif pull`
+3. **Review pending**: `argus notif list --pending --limit 5`
+4. **Triage**: For each pending notification:
+   - If actionable: `argus notif act <id> <action> "<detail>"`
+   - If not relevant: `argus notif dismiss <id> "<reason>"`
+5. **Audit stale**: `argus notif audit --stale-hours 48`
+6. **Log activity**: Record significant actions with `argus activity log`
+7. **Check escalations**: `argus escalate list --status open`
+```
+
+The install script outputs this block — just copy it to your HEARTBEAT.md.
 
 ## Commands
 
