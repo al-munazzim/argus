@@ -7,6 +7,9 @@ set -e
 INSTALL_DIR="/opt/argus"
 SKILL_LINK="/olymp/shared/skills/argus"
 
+# Calculate port from UID: 8100 + (UID mod 100) * 10
+ARGUS_PORT=$((8100 + ($(id -u) % 100) * 10))
+
 echo "╔════════════════════════════════════════╗"
 echo "║        Argus Installation              ║"
 echo "╚════════════════════════════════════════╝"
@@ -98,9 +101,9 @@ cat << 'HEARTBEAT'
 HEARTBEAT
 echo "──────────────────────────────────────────────────────────────────"
 echo
-echo "Dashboard URLs (default port 8100):"
-echo "  - Dashboard:  http://localhost:8100"
-echo "  - Datasette:  http://localhost:8101"
+echo "Dashboard URLs (based on UID $(id -u)):"
+echo "  - Dashboard:  http://localhost:${ARGUS_PORT}"
+echo "  - Datasette:  http://localhost:$((ARGUS_PORT + 1))"
 echo
-echo "Set ARGUS_PORT to change (e.g., ARGUS_PORT=8200 for 8200/8201)"
+echo "Port formula: ARGUS_PORT = 8100 + (UID mod 100) * 10"
 echo "══════════════════════════════════════════════════════════════════"
