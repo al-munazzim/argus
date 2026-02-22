@@ -70,11 +70,37 @@ fi
 echo
 echo "✓ Installation complete!"
 echo
-echo "Next steps:"
-echo "  1. Set up GitHub token: export GH_TOKEN=your_token"
-echo "  2. Pull notifications: argus notif pull"
-echo "  3. Start dashboard: systemctl start argus"
+echo "══════════════════════════════════════════════════════════════════"
+echo "NEXT STEPS"
+echo "══════════════════════════════════════════════════════════════════"
 echo
-echo "Dashboard will be available at:"
-echo "  - Datasette API: http://localhost:8100"
-echo "  - Dashboard:     http://localhost:8101"
+echo "1. Set up authentication (choose one):"
+echo "   - GitHub:  gh auth login"
+echo "   - Forgejo: export ARGUS_BACKEND=tea (needs token with read:notification)"
+echo
+echo "2. Start the dashboard service:"
+echo "   systemctl enable --now argus"
+echo
+echo "3. Add to your HEARTBEAT.md:"
+echo
+echo "──────────────────────────────────────────────────────────────────"
+cat << 'HEARTBEAT'
+### Argus Community Awareness (Daily)
+1. **Check status**: `argus status`
+2. **Pull notifications** (if auth configured): `argus notif pull`
+3. **Review pending**: `argus notif list --pending --limit 5`
+4. **Triage**: For each pending notification:
+   - If actionable: `argus notif act <id> <action> "<detail>"`
+   - If not relevant: `argus notif dismiss <id> "<reason>"`
+5. **Audit stale**: `argus notif audit --stale-hours 48`
+6. **Log activity**: Record significant actions with `argus activity log`
+7. **Check escalations**: `argus escalate list --status open`
+HEARTBEAT
+echo "──────────────────────────────────────────────────────────────────"
+echo
+echo "Dashboard URLs (default port 8100):"
+echo "  - Dashboard:  http://localhost:8100"
+echo "  - Datasette:  http://localhost:8101"
+echo
+echo "Set ARGUS_PORT to change (e.g., ARGUS_PORT=8200 for 8200/8201)"
+echo "══════════════════════════════════════════════════════════════════"
