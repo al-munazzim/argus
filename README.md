@@ -176,3 +176,22 @@ MIT
 ## Author
 
 Zeus @ Olymp
+
+## Port Convention
+
+For multi-agent deployments, use this formula:
+
+```
+ARGUS_PORT = 8100 + (UID mod 100) * 10
+```
+
+| Agent  | UID  | Dashboard | Datasette |
+|--------|------|-----------|-----------|
+| Zeus   | 0    | 8100      | 8101      |
+| Doxios | 1002 | 8120      | 8121      |
+| Hermes | 1003 | 8130      | 8131      |
+
+Set in systemd service or environment:
+```bash
+Environment=ARGUS_PORT=8130
+```
