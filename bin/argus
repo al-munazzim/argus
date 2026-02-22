@@ -152,22 +152,31 @@ def tea_fetch_notifications() -> list:
     
     output = tea_cmd(["notifications", "list", "--mine", "-o", "yaml"])
     
+    # Filter out "NOTE:" lines that tea prints to stdout (breaks YAML parsing)
+    lines = [l for l in output.split('\n') if not l.startswith('NOTE:')]
+    clean_output = '\n'.join(lines)
+    
     # Parse YAML output
     try:
-        notifications = yaml.safe_load(output) or []
-    except:
-        # Fallback: parse line by line if yaml fails
+        notifications = yaml.safe_load(clean_output) or []
+    except Exception as e:
+        print(f"Warning: Failed to parse tea output: {e}", file=sys.stderr)
         notifications = []
     
     results = []
     for notif in notifications:
         # tea notifications format differs from gh
+        repo = notif.get("repository", "")
+        index = notif.get("index", "")
+        # Construct URL from repo and issue/PR number
+        url = f"https://forgejo.tail593e12.ts.net/{repo}/issues/{index}" if repo and index else ""
+        
         results.append({
             "id": str(notif.get("id", "")),
-            "repo_id": notif.get("repository", ""),
+            "repo_id": repo,
             "reason": notif.get("type", "unknown"),
             "title": notif.get("title", ""),
-            "url": "",  # tea doesn't provide URL directly
+            "url": url,
             "type": notif.get("type", "").lower(),
         })
     return results
