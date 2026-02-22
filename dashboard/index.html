@@ -220,7 +220,10 @@
     </div>
 
     <script>
-        const API_BASE = 'http://localhost:8100';
+        // Auto-detect datasette URL: same host, port+1
+        const dashboardPort = parseInt(window.location.port) || 8100;
+        const datasettePort = dashboardPort + 1;
+        const API_BASE = `${window.location.protocol}//${window.location.hostname}:${datasettePort}`;
         
         async function fetchData(table, sql) {
             const url = `${API_BASE}/argus.json?sql=${encodeURIComponent(sql)}&_shape=array`;
