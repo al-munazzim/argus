@@ -1,31 +1,99 @@
 ---
 name: argus
-description: "GitHub/Forgejo community awareness tool. TRIGGERS: notifications, community triage, PR reviews, issue tracking, escalations. Use when managing GitHub notifications, logging community actions, or tracking escalations."
+description: "GitHub/Forgejo community awareness tool. TRIGGERS: notifications, community triage, PR reviews, issue tracking, escalations, watch repos. Use when managing GitHub/Forgejo notifications, logging community actions, tracking escalations, or setting up community monitoring."
 ---
 
 # Argus Skill
 
 CLI tool for GitHub/Forgejo community awareness — tracking notifications, logging activity, managing escalations.
 
-## Quick Start
+## Installation (For Agents)
+
+If `argus` is not installed, run these steps:
+
+### Step 1: Install Argus
 
 ```bash
-# Initialize database
-argus init
-
-# Pull notifications from GitHub
-argus notif pull
-
-# View status
-argus status
-
-# Start dashboard
-argus serve
+git clone https://forgejo.tail593e12.ts.net/Zeus/argus.git /opt/argus
+cd /opt/argus && ./scripts/install.sh
+ln -sf ~/.local/bin/datasette /usr/local/bin/datasette 2>/dev/null || true
 ```
 
-## Commands
+### Step 2: Create Forgejo Token
 
-### Status & Info
+You need your Forgejo password. Check your git config:
+```bash
+grep -o 'https://[^:]*:[^@]*@' ~/.openclaw/workspace/.git/config | head -1
+```
+
+Then create a token with notification scope:
+```bash
+# Replace YOURNAME and YOURPASSWORD
+curl -s -X POST "https://forgejo.tail593e12.ts.net/api/v1/users/YOURNAME/tokens" \
+  -u "YOURNAME:YOURPASSWORD" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"argus","scopes":["read:notification","read:repository","write:repository"]}' | jq -r '.sha1'
+```
+
+### Step 3: Configure Tea
+
+```bash
+mkdir -p ~/.config/tea
+cat > ~/.config/tea/config.yml << EOF
+logins:
+  - name: olymp
+    url: https://forgejo.tail593e12.ts.net
+    token: TOKEN_FROM_STEP_2
+    default: true
+    user: YOURNAME
+EOF
+```
+
+### Step 4: Watch Repos & Test
+
+```bash
+# Watch repos you care about
+argus repo watch owner/repo
+
+# Test notification pull
+argus notif pull --backend tea
+
+# Check status
+argus status
+```
+
+### Step 5: Add to HEARTBEAT.md
+
+Add this block to your HEARTBEAT.md:
+
+```markdown
+### Argus Community Awareness (Daily)
+1. **Check status**: `argus status`
+2. **Pull notifications**: `argus notif pull`
+3. **Review pending**: `argus notif list --pending --limit 5`
+4. **Triage**: For each pending notification:
+   - If actionable: `argus notif act <id> <action> "<detail>"`
+   - If not relevant: `argus notif dismiss <id> "<reason>"`
+5. **Audit stale**: `argus notif audit --stale-hours 48`
+6. **Log activity**: Record significant actions with `argus activity log`
+7. **Check escalations**: `argus escalate list --status open`
+```
+
+### Step 6: Start Service (Optional)
+
+```bash
+systemctl enable --now argus
+```
+
+Dashboard: http://localhost:8100
+
+---
+
+## Daily Usage
+
+Once installed, use these commands:
+
+### Status
 
 ```bash
 argus version           # Show version
@@ -43,11 +111,11 @@ argus repo unwatch <owner/repo>    # Unsubscribe from repo
 ### Notifications
 
 ```bash
-argus notif pull [--backend gh|tea] [--dry-run]  # Fetch notifications
-argus notif list [--pending]                      # List notifications
-argus notif act <id> <action>                     # Mark as acted
-argus notif dismiss <id> [reason]                 # Dismiss
-argus notif audit [--stale-hours]                 # Auto-escalate stale
+argus notif pull [--backend gh|tea]  # Fetch notifications
+argus notif list [--pending]         # List notifications
+argus notif act <id> <action>        # Mark as acted
+argus notif dismiss <id> [reason]    # Dismiss
+argus notif audit [--stale-hours]    # Auto-escalate stale
 ```
 
 ### Activity Logging
@@ -66,12 +134,6 @@ argus escalate ack <id>
 argus escalate resolve <id> --by WHO --resolution "..."
 ```
 
-### Service
-
-```bash
-argus serve [--port 8100] [--dashboard-port 8101]
-```
-
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -79,27 +141,14 @@ argus serve [--port 8100] [--dashboard-port 8101]
 | `ARGUS_DB` | `~/.argus/argus.db` | Database path |
 | `ARGUS_PORT` | `8100` | Dashboard port (datasette on port+1) |
 | `ARGUS_BACKEND` | `gh` | Backend: `gh` (GitHub) or `tea` (Forgejo) |
-| `GH_TOKEN` | — | GitHub API token (for gh backend) |
 
-## Workflow
+## Triage Workflow
 
-1. **Pull notifications:** `argus notif pull`
-2. **Review pending:** `argus notif list --pending`
-3. **Act or dismiss:** `argus notif act <id> reviewed` or `argus notif dismiss <id> duplicate`
-4. **Log activity:** `argus activity log commented "Answered question"`
-5. **Check dashboard:** Open http://localhost:8101
-
-## Sub-Agent Usage
-
-For automated community management:
-
-```
-Read notifications with argus notif list --pending.
-For each notification:
-- If PR: review changes, comment if needed
-- If issue: assess priority, respond or escalate
-- Log action with argus activity log
-After processing: argus notif audit
-```
-
-See `procedures/subagent-completion.md` for detailed patterns.
+1. **Pull**: `argus notif pull`
+2. **Review**: `argus notif list --pending`
+3. **For each notification**:
+   - Check the issue/PR (URL provided)
+   - If actionable: `argus notif act <id> reviewed "Added comment"`
+   - If not relevant: `argus notif dismiss <id> "Not my area"`
+4. **Audit**: `argus notif audit` (escalates stale items)
+5. **Log**: `argus activity log triage "Processed 5 notifications"`
