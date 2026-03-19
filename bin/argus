@@ -19,7 +19,7 @@ from typing import Optional
 # Configuration
 # ============================================================================
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 DEFAULT_DB_PATH = Path.home() / ".argus" / "argus.db"
 DEFAULT_PORT = 8100  # Dashboard port; datasette runs on port+1
 
@@ -84,15 +84,40 @@ def get_backend() -> str:
 # GitHub API (gh backend)
 # ============================================================================
 
-def gh_api(endpoint: str) -> dict:
+def gh_api(endpoint: str, paginate: bool = False) -> dict:
     """Call GitHub API via gh CLI."""
     try:
+        cmd = ["gh", "api"]
+        if paginate:
+            cmd.append("--paginate")
+        cmd.append(endpoint)
         result = subprocess.run(
-            ["gh", "api", endpoint],
+            cmd,
             capture_output=True,
             text=True,
             check=True
         )
+        # --paginate may return multiple JSON arrays concatenated: [...][\n...]
+        raw = result.stdout.strip()
+        if paginate and raw.startswith('['):
+            # Use JSONDecoder to parse successive arrays
+            decoder = json.JSONDecoder()
+            merged = []
+            idx = 0
+            while idx < len(raw):
+                if raw[idx] in ' \t\n\r':
+                    idx += 1
+                    continue
+                try:
+                    obj, end = decoder.raw_decode(raw, idx)
+                    if isinstance(obj, list):
+                        merged.extend(obj)
+                    else:
+                        merged.append(obj)
+                    idx = end
+                except json.JSONDecodeError:
+                    break
+            return merged
         return json.loads(result.stdout)
     except subprocess.CalledProcessError as e:
         print(f"Error calling GitHub API: {e.stderr}", file=sys.stderr)
@@ -102,8 +127,8 @@ def gh_api(endpoint: str) -> dict:
         sys.exit(1)
 
 def gh_fetch_notifications() -> list:
-    """Fetch notifications from GitHub."""
-    notifications = gh_api("notifications")
+    """Fetch notifications from GitHub (with pagination)."""
+    notifications = gh_api("notifications", paginate=True)
     results = []
     for notif in notifications:
         repo_full = notif["repository"]["full_name"]
@@ -119,8 +144,100 @@ def gh_fetch_notifications() -> list:
             "title": notif["subject"]["title"],
             "url": web_url,
             "type": notif["subject"]["type"].lower(),
+            "subject_url": notif["subject"]["url"] or "",
         })
     return results
+
+
+def gh_get_own_prs(agent_user: str = "al-munazzim") -> dict:
+    """Fetch all open PRs by agent user. Returns {subject_api_url: pr_info}."""
+    try:
+        results = gh_api(f"search/issues?q=author:{agent_user}+type:pr+state:open&per_page=100")
+        own_prs = {}
+        for item in results.get("items", []):
+            html_url = item.get("html_url", "")
+            if "/pull/" in html_url:
+                # Build the subject API URL that matches notification subject_url
+                api_url = html_url.replace("https://github.com/", "https://api.github.com/repos/")
+                api_url = api_url.replace("/pull/", "/pulls/")
+                own_prs[api_url] = {
+                    "pr_number": item.get("number"),
+                    "comments": item.get("comments", 0),
+                    "repo": "/".join(html_url.split("/")[3:5]),
+                }
+        return own_prs
+    except Exception as e:
+        print(f"Warning: Could not fetch own PRs: {e}", file=sys.stderr)
+        return {}
+
+
+def gh_check_ci_status(repo: str, pr_number: int) -> str:
+    """Check CI status for a specific PR."""
+    try:
+        pr_data = gh_api(f"repos/{repo}/pulls/{pr_number}")
+        head_sha = pr_data.get("head", {}).get("sha", "")
+        if not head_sha:
+            return "unknown"
+        check_data = gh_api(f"repos/{repo}/commits/{head_sha}/check-runs")
+        runs = check_data.get("check_runs", [])
+        if not runs:
+            return "none"
+        statuses = [r.get("conclusion") or r.get("status") for r in runs]
+        if "failure" in statuses:
+            return "failing"
+        if all(s == "success" for s in statuses):
+            return "passing"
+        if "in_progress" in statuses or "queued" in statuses:
+            return "pending"
+        return "mixed"
+    except Exception:
+        return "unknown"
+
+
+def apply_filter_rules(conn: sqlite3.Connection, notif: dict) -> tuple:
+    """Apply filter rules to a notification. Returns (dismiss: bool, reason: str)."""
+    # Rule 0: Own PRs with failing CI or review comments are ALWAYS kept
+    if notif.get("_own_pr"):
+        own = notif["_own_pr"]
+        if own.get("ci_status") == "failing":
+            return (False, f"KEEP: own PR #{own.get('pr_number')} has failing CI")
+        if own.get("review_comments", 0) > 0:
+            return (False, f"KEEP: own PR #{own.get('pr_number')} has {own['review_comments']} review comments")
+        # Own PR but no issues — still keep but note why
+        return (False, f"KEEP: own PR #{own.get('pr_number')} (ci: {own.get('ci_status', 'unknown')})")
+    
+    # Load DB filter rules (ordered by priority desc)
+    rules = conn.execute(
+        "SELECT * FROM filter_rules WHERE enabled = 1 ORDER BY priority DESC"
+    ).fetchall()
+    
+    for rule in rules:
+        field_val = str(notif.get(rule["field"], ""))
+        match = False
+        if rule["op"] == "eq":
+            match = field_val == rule["value"]
+        elif rule["op"] == "neq":
+            match = field_val != rule["value"]
+        elif rule["op"] == "contains":
+            match = rule["value"].lower() in field_val.lower()
+        elif rule["op"] == "matches":
+            import re
+            match = bool(re.search(rule["value"], field_val, re.IGNORECASE))
+        
+        if match:
+            desc = rule["description"] or f"{rule['field']} {rule['op']} '{rule['value']}'"
+            if rule["action"] == "keep":
+                return (False, f"KEEP (rule): {desc}")
+            else:
+                return (True, f"AUTO-DISMISS (rule): {desc}")
+    
+    # Default rules (hardcoded fallbacks when no DB rules match)
+    # Subscribed + not own PR = noise
+    if notif.get("reason") == "subscribed":
+        return (True, "AUTO-DISMISS: reason=subscribed (mass watch noise)")
+    
+    # Keep everything else
+    return (False, f"KEEP: reason={notif.get('reason')}")
 
 # ============================================================================
 # Forgejo API (tea backend)
@@ -448,17 +565,32 @@ def cmd_repo_unwatch(args) -> None:
 # ============================================================================
 
 def cmd_notif_pull(args) -> None:
-    """Pull notifications from GitHub/Forgejo."""
+    """Pull notifications from GitHub/Forgejo with smart filtering."""
     conn = get_db()
+    
+    # Ensure new columns exist (migration for existing DBs)
+    _migrate_filter_columns(conn)
     
     # Determine backend
     backend = getattr(args, 'backend', None) or get_backend()
+    no_filter = getattr(args, 'no_filter', False)
     print(f"Using backend: {backend}")
     
     # Fetch notifications using the appropriate backend
     notifications = fetch_notifications(backend)
     
+    # Pre-fetch own PRs in one API call (instead of per-notification)
+    own_pr_index = {}
+    if backend == "gh":
+        print("Checking own PRs...")
+        own_pr_index = gh_get_own_prs()
+        if own_pr_index:
+            print(f"  Found {len(own_pr_index)} open own PRs")
+    
     new_count = 0
+    kept_count = 0
+    dismissed_count = 0
+    
     for notif in notifications:
         notif_id = notif["id"]
         
@@ -471,17 +603,54 @@ def cmd_notif_pull(args) -> None:
         if existing:
             continue
         
+        # Match against pre-fetched own PRs (O(1) lookup, no API call)
+        own_pr = {}
+        subject_url = notif.get("subject_url", "")
+        if subject_url in own_pr_index:
+            own_info = own_pr_index[subject_url]
+            # Only fetch CI for own PRs (targeted API calls)
+            ci_status = gh_check_ci_status(own_info["repo"], own_info["pr_number"])
+            own_pr = {
+                "is_own": True,
+                "pr_number": own_info["pr_number"],
+                "review_comments": own_info["comments"],
+                "ci_status": ci_status,
+            }
+            notif["_own_pr"] = own_pr
+        
+        # Apply filters
+        if no_filter:
+            dismiss = False
+            filter_reason = "KEEP: --no-filter"
+        else:
+            dismiss, filter_reason = apply_filter_rules(conn, notif)
+        
+        is_own = 1 if own_pr.get("is_own") else 0
+        ci_status = own_pr.get("ci_status")
+        
         if args.dry_run:
-            print(f"[DRY-RUN] Would add: {notif['title']} ({notif['reason']})")
+            status = "DISMISS" if dismiss else "KEEP"
+            print(f"[DRY-RUN] [{status}] {notif['title'][:60]}")
+            print(f"           → {filter_reason}")
             new_count += 1
+            if dismiss:
+                dismissed_count += 1
+            else:
+                kept_count += 1
             continue
         
         conn.execute("""
-            INSERT INTO notifications (id, repo_id, reason, title, url, seen_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (notif_id, notif["repo_id"], notif["reason"], notif["title"], 
-              notif["url"], datetime.now().isoformat()))
+            INSERT INTO notifications (id, repo_id, reason, title, url, type, seen_at,
+                                       dismissed, filter_reason, is_own_pr, ci_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (notif_id, notif["repo_id"], notif["reason"], notif["title"],
+              notif["url"], notif.get("type"), datetime.now().isoformat(),
+              1 if dismiss else 0, filter_reason, is_own, ci_status))
         new_count += 1
+        if dismiss:
+            dismissed_count += 1
+        else:
+            kept_count += 1
     
     if not args.dry_run:
         # Record poll
@@ -493,10 +662,39 @@ def cmd_notif_pull(args) -> None:
     
     conn.close()
     
-    if args.dry_run:
-        print(f"\n[DRY-RUN] Would add {new_count} notifications")
-    else:
-        print(f"✓ Pulled {new_count} new notifications")
+    prefix = "[DRY-RUN] " if args.dry_run else "✓ "
+    print(f"\n{prefix}Pulled {new_count} new ({kept_count} kept, {dismissed_count} auto-dismissed)")
+
+
+def _migrate_filter_columns(conn: sqlite3.Connection) -> None:
+    """Add new columns to existing databases."""
+    cursor = conn.execute("PRAGMA table_info(notifications)")
+    columns = {row[1] for row in cursor.fetchall()}
+    
+    migrations = {
+        "type": "TEXT",
+        "filter_reason": "TEXT", 
+        "is_own_pr": "INTEGER DEFAULT 0",
+        "ci_status": "TEXT",
+    }
+    for col, typedef in migrations.items():
+        if col not in columns:
+            conn.execute(f"ALTER TABLE notifications ADD COLUMN {col} {typedef}")
+    
+    # Create filter_rules table if missing
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS filter_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            field TEXT NOT NULL,
+            op TEXT NOT NULL,
+            value TEXT NOT NULL,
+            action TEXT DEFAULT 'dismiss',
+            priority INTEGER DEFAULT 0,
+            enabled INTEGER DEFAULT 1,
+            description TEXT
+        )
+    """)
+    conn.commit()
 
 def cmd_notif_list(args) -> None:
     """List notifications."""
@@ -508,6 +706,10 @@ def cmd_notif_list(args) -> None:
     
     if args.pending:
         conditions.append("dismissed = 0 AND acted_at IS NULL")
+    if getattr(args, 'dismissed', False):
+        conditions.append("dismissed = 1")
+    if getattr(args, 'own', False):
+        conditions.append("is_own_pr = 1")
     
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
@@ -525,8 +727,12 @@ def cmd_notif_list(args) -> None:
     
     for n in notifications:
         status = "✓" if n["acted_at"] else ("✗" if n["dismissed"] else "○")
-        print(f"{status} [{n['id'][:8]}] {n['title'][:60]}")
+        own_tag = " 🔵" if n["is_own_pr"] else ""
+        ci_tag = f" [CI:{n['ci_status']}]" if n["ci_status"] else ""
+        print(f"{status}{own_tag}{ci_tag} [{n['id'][:8]}] {n['title'][:60]}")
         print(f"   Repo: {n['repo_id']} | Reason: {n['reason']}")
+        if n["filter_reason"]:
+            print(f"   Filter: {n['filter_reason']}")
         if n["url"]:
             print(f"   URL: {n['url']}")
         print()
@@ -629,6 +835,63 @@ def cmd_notif_audit(args) -> None:
     conn.close()
     
     print(f"\n✓ Created {len(stale)} escalations")
+
+# ============================================================================
+# Commands: Filter Rules
+# ============================================================================
+
+def cmd_filter_list(args) -> None:
+    """List filter rules."""
+    conn = get_db()
+    _migrate_filter_columns(conn)
+    rules = conn.execute("SELECT * FROM filter_rules ORDER BY priority DESC").fetchall()
+    conn.close()
+    
+    if not rules:
+        print("No filter rules configured.")
+        print("\nDefault rules (hardcoded):")
+        print("  • reason=subscribed → auto-dismiss")
+        print("  • own PRs (al-munazzim) with failing CI or reviews → always keep")
+        return
+    
+    print("Filter rules (highest priority first):\n")
+    for r in rules:
+        status = "✓" if r["enabled"] else "✗"
+        print(f"  {status} [{r['id']}] {r['field']} {r['op']} '{r['value']}' → {r['action']}")
+        if r["description"]:
+            print(f"       {r['description']}")
+    
+    print("\nHardcoded rules (always active):")
+    print("  • own PRs (al-munazzim) with failing CI or reviews → always keep")
+    print("  • reason=subscribed → auto-dismiss (fallback)")
+
+
+def cmd_filter_add(args) -> None:
+    """Add a filter rule."""
+    conn = get_db()
+    _migrate_filter_columns(conn)
+    conn.execute("""
+        INSERT INTO filter_rules (field, op, value, action, priority, description)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (args.field, args.op, args.value, args.action, args.priority, args.desc))
+    conn.commit()
+    conn.close()
+    print(f"✓ Added filter rule: {args.field} {args.op} '{args.value}' → {args.action}")
+
+
+def cmd_filter_rm(args) -> None:
+    """Remove a filter rule."""
+    conn = get_db()
+    _migrate_filter_columns(conn)
+    deleted = conn.execute("DELETE FROM filter_rules WHERE id = ?", (args.id,)).rowcount
+    conn.commit()
+    conn.close()
+    if deleted:
+        print(f"✓ Removed filter rule {args.id}")
+    else:
+        print(f"Error: Rule {args.id} not found", file=sys.stderr)
+        sys.exit(1)
+
 
 # ============================================================================
 # Commands: Activity
@@ -848,11 +1111,31 @@ def main():
     
     pull_parser = notif_sub.add_parser("pull", help="Pull notifications from GitHub/Forgejo")
     pull_parser.add_argument("--dry-run", action="store_true", help="Show what would be pulled")
+    pull_parser.add_argument("--no-filter", action="store_true", help="Disable filtering, keep all")
     pull_parser.add_argument("--backend", choices=["gh", "tea"], help="Backend: gh (GitHub) or tea (Forgejo)")
     
     list_parser = notif_sub.add_parser("list", help="List notifications")
     list_parser.add_argument("--pending", action="store_true", help="Show only pending")
+    list_parser.add_argument("--dismissed", action="store_true", help="Show only dismissed")
+    list_parser.add_argument("--own", action="store_true", help="Show only own PRs")
     list_parser.add_argument("--limit", type=int, help="Limit results")
+    
+    # Filter rule management
+    filter_parser = notif_sub.add_parser("filter", help="Manage filter rules")
+    filter_sub = filter_parser.add_subparsers(dest="filter_cmd")
+    
+    filter_list_p = filter_sub.add_parser("list", help="List filter rules")
+    
+    filter_add_p = filter_sub.add_parser("add", help="Add filter rule")
+    filter_add_p.add_argument("--field", required=True, choices=["reason", "repo_id", "title", "type"], help="Field to match")
+    filter_add_p.add_argument("--op", required=True, choices=["eq", "neq", "contains", "matches"], help="Operator")
+    filter_add_p.add_argument("--value", required=True, help="Value to match")
+    filter_add_p.add_argument("--action", choices=["dismiss", "keep"], default="dismiss", help="Action (default: dismiss)")
+    filter_add_p.add_argument("--priority", type=int, default=0, help="Priority (higher = checked first)")
+    filter_add_p.add_argument("--desc", help="Human-readable description")
+    
+    filter_rm_p = filter_sub.add_parser("rm", help="Remove filter rule")
+    filter_rm_p.add_argument("id", type=int, help="Rule ID")
     
     act_parser = notif_sub.add_parser("act", help="Mark as acted on")
     act_parser.add_argument("id", help="Notification ID (prefix match)")
@@ -936,6 +1219,15 @@ def main():
             cmd_notif_dismiss(args)
         elif args.notif_cmd == "audit":
             cmd_notif_audit(args)
+        elif args.notif_cmd == "filter":
+            if getattr(args, 'filter_cmd', None) == "list":
+                cmd_filter_list(args)
+            elif getattr(args, 'filter_cmd', None) == "add":
+                cmd_filter_add(args)
+            elif getattr(args, 'filter_cmd', None) == "rm":
+                cmd_filter_rm(args)
+            else:
+                filter_parser.print_help()
         else:
             notif_parser.print_help()
     elif args.command == "activity":

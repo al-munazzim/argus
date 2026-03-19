@@ -32,12 +32,28 @@ CREATE TABLE IF NOT EXISTS notifications (
     reason TEXT,
     title TEXT,
     url TEXT,
+    type TEXT,
     seen_at TEXT,
     acted_at TEXT,
     action_taken TEXT,
     dismissed INTEGER DEFAULT 0,
+    filter_reason TEXT,
+    is_own_pr INTEGER DEFAULT 0,
+    ci_status TEXT,
     FOREIGN KEY (issue_id) REFERENCES issues(id),
     FOREIGN KEY (repo_id) REFERENCES repos(id)
+);
+
+-- Filter rules for auto-dismissing notifications
+CREATE TABLE IF NOT EXISTS filter_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    field TEXT NOT NULL,          -- reason | repo_id | title | type
+    op TEXT NOT NULL,             -- eq | neq | contains | matches
+    value TEXT NOT NULL,
+    action TEXT DEFAULT 'dismiss', -- dismiss | keep
+    priority INTEGER DEFAULT 0,  -- higher = checked first
+    enabled INTEGER DEFAULT 1,
+    description TEXT
 );
 
 -- Activity log
