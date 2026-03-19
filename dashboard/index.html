@@ -192,7 +192,7 @@
     <div class="section">
         <div class="card">
             <h2>
-                Recent Notifications
+                🔔 Notifications <span id="poll-info" style="font-weight:normal;font-size:0.7em;color:var(--text-dim)"></span>
                 <button class="refresh-btn" onclick="loadData()">↻ Refresh</button>
             </h2>
             <div id="notifications-table">
@@ -238,6 +238,21 @@
             return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
         }
         
+        function timeAgo(iso) {
+            if (!iso) return '-';
+            const d = new Date(iso);
+            const now = new Date();
+            const diffMs = now - d;
+            const mins = Math.floor(diffMs / 60000);
+            if (mins < 1) return 'just now';
+            if (mins < 60) return `${mins}m ago`;
+            const hrs = Math.floor(mins / 60);
+            const remMins = mins % 60;
+            if (hrs < 24) return remMins > 0 ? `${hrs}h ${remMins}m ago` : `${hrs}h ago`;
+            const days = Math.floor(hrs / 24);
+            return `${days}d ago`;
+        }
+        
         function getNotificationStatus(row) {
             if (row.dismissed) return { class: 'status-dismissed', text: 'Dismissed' };
             if (row.acted_at) return { class: 'status-acted', text: 'Acted' };
@@ -263,25 +278,42 @@
                     "SELECT COUNT(*) as c FROM escalations WHERE status = 'open'");
                 document.getElementById('escalation-count').textContent = escalations[0]?.c || 0;
                 
-                // Notifications table
+                // Last poll info
+                const polls = await fetchData('notification_polls',
+                    'SELECT polled_at, new_count FROM notification_polls ORDER BY polled_at DESC LIMIT 1');
+                if (polls.length > 0) {
+                    const p = polls[0];
+                    document.getElementById('poll-info').textContent = 
+                        `(last poll ${timeAgo(p.polled_at)} — ${p.new_count} new)`;
+                }
+                
+                // Notifications table — show pending (non-dismissed) by default
                 const notifications = await fetchData('notifications',
-                    'SELECT * FROM notifications ORDER BY seen_at DESC LIMIT 10');
+                    'SELECT * FROM notifications WHERE dismissed = 0 ORDER BY seen_at DESC LIMIT 30');
                 
                 if (notifications.length === 0) {
                     document.getElementById('notifications-table').innerHTML = 
-                        '<div class="loading">No notifications yet.</div>';
+                        '<div class="loading">No pending notifications. ✨</div>';
                 } else {
                     let html = `<table>
-                        <thead><tr><th>Status</th><th>Title</th><th>Repo</th><th>Seen</th></tr></thead>
+                        <thead><tr><th>TIME</th><th>ISSUE</th><th>REASON</th><th>TITLE</th><th>FILTER</th></tr></thead>
                         <tbody>`;
                     for (const n of notifications) {
-                        const status = getNotificationStatus(n);
-                        const title = n.url ? `<a href="${n.url}" target="_blank">${n.title}</a>` : n.title;
+                        const ownTag = n.is_own_pr ? '🔵 ' : '';
+                        const ciTag = n.ci_status ? ` [CI:${n.ci_status}]` : '';
+                        const repo_short = n.repo_id ? n.repo_id.split('/').pop() : '-';
+                        const issue = n.url ? `<a href="${n.url}" target="_blank">${repo_short}</a>` : repo_short;
+                        const reasonClass = n.reason === 'mention' ? 'accent' : 
+                                          n.reason === 'author' ? 'success' : 
+                                          n.reason === 'review_requested' ? 'warning' : '';
+                        const reasonBadge = `<span class="status-badge ${reasonClass ? 'status-' + reasonClass : ''}" style="background:var(--${reasonClass || 'text-dim'}); color:#000; padding:2px 8px; border-radius:4px; font-size:0.8em">${n.reason}</span>`;
+                        const filterShort = (n.filter_reason || '').replace(/^KEEP: /, '');
                         html += `<tr>
-                            <td><span class="status-badge ${status.class}">${status.text}</span></td>
-                            <td>${title}</td>
-                            <td>${n.repo_id || '-'}</td>
-                            <td class="timestamp">${formatDate(n.seen_at)}</td>
+                            <td class="timestamp">${timeAgo(n.seen_at)}</td>
+                            <td>${issue}</td>
+                            <td>${reasonBadge}</td>
+                            <td>${ownTag}${n.title || '-'}${ciTag}</td>
+                            <td style="color:var(--text-dim);font-size:0.85em">${filterShort}</td>
                         </tr>`;
                     }
                     html += '</tbody></table>';
