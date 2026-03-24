@@ -705,7 +705,7 @@ def cmd_notif_list(args) -> None:
     params = []
     
     if args.pending:
-        conditions.append("dismissed = 0 AND acted_at IS NULL")
+        conditions.append("dismissed = 0 AND acted_at IS NULL AND processing = 0")
     if getattr(args, 'dismissed', False):
         conditions.append("dismissed = 1")
     if getattr(args, 'own', False):
@@ -726,7 +726,11 @@ def cmd_notif_list(args) -> None:
         return
     
     for n in notifications:
-        status = "✓" if n["acted_at"] else ("✗" if n["dismissed"] else "○")
+        try:
+            locked = n["processing"]
+        except (IndexError, KeyError):
+            locked = 0
+        status = "✓" if n["acted_at"] else ("✗" if n["dismissed"] else ("🔒" if locked else "○"))
         own_tag = " 🔵" if n["is_own_pr"] else ""
         ci_tag = f" [CI:{n['ci_status']}]" if n["ci_status"] else ""
         print(f"{status}{own_tag}{ci_tag} [{n['id'][:8]}] {n['title'][:60]}")
@@ -773,6 +777,41 @@ def cmd_notif_act(args) -> None:
     
     print(f"✓ Marked notification as acted: {action}")
 
+def cmd_notif_lock(args) -> None:
+    """Lock notification to prevent duplicate processing."""
+    conn = get_db()
+    notif = conn.execute(
+        "SELECT * FROM notifications WHERE id LIKE ?",
+        (f"{args.id}%",)
+    ).fetchone()
+    if not notif:
+        print(f"Error: Notification not found: {args.id}", file=sys.stderr)
+        sys.exit(1)
+    if notif["processing"]:
+        print(f"⚠ Already locked: {notif['id'][:8]}")
+        sys.exit(1)
+    conn.execute("UPDATE notifications SET processing = 1 WHERE id = ?", (notif["id"],))
+    conn.commit()
+    conn.close()
+    print(f"🔒 Locked: {notif['id'][:8]}")
+
+
+def cmd_notif_unlock(args) -> None:
+    """Unlock notification after processing completes."""
+    conn = get_db()
+    notif = conn.execute(
+        "SELECT * FROM notifications WHERE id LIKE ?",
+        (f"{args.id}%",)
+    ).fetchone()
+    if not notif:
+        print(f"Error: Notification not found: {args.id}", file=sys.stderr)
+        sys.exit(1)
+    conn.execute("UPDATE notifications SET processing = 0 WHERE id = ?", (notif["id"],))
+    conn.commit()
+    conn.close()
+    print(f"🔓 Unlocked: {notif['id'][:8]}")
+
+
 def cmd_notif_dismiss(args) -> None:
     """Dismiss notification."""
     conn = get_db()
@@ -794,6 +833,14 @@ def cmd_notif_dismiss(args) -> None:
         SET dismissed = 1, action_taken = ?
         WHERE id = ?
     """, (f"dismissed: {reason}", notif["id"]))
+    
+    # Auto-log activity
+    title = notif["title"] or "-"
+    detail = f"Dismissed: {reason} — {title}"
+    conn.execute(
+        "INSERT INTO activity_log (issue_id, action, detail, github_url) VALUES (?, ?, ?, ?)",
+        (notif["repo_id"], "dismiss", detail, notif["url"])
+    )
     
     conn.commit()
     conn.close()
@@ -1146,6 +1193,12 @@ def main():
     dismiss_parser.add_argument("id", help="Notification ID (prefix match)")
     dismiss_parser.add_argument("reason", nargs="?", help="Dismissal reason")
     
+    lock_parser = notif_sub.add_parser("lock", help="Lock notification for processing")
+    lock_parser.add_argument("id", help="Notification ID (prefix match)")
+    
+    unlock_parser = notif_sub.add_parser("unlock", help="Unlock notification after processing")
+    unlock_parser.add_argument("id", help="Notification ID (prefix match)")
+    
     audit_parser = notif_sub.add_parser("audit", help="Audit stale notifications")
     audit_parser.add_argument("--stale-hours", type=int, help="Hours to consider stale (default: 48)")
     
@@ -1217,6 +1270,10 @@ def main():
             cmd_notif_act(args)
         elif args.notif_cmd == "dismiss":
             cmd_notif_dismiss(args)
+        elif args.notif_cmd == "lock":
+            cmd_notif_lock(args)
+        elif args.notif_cmd == "unlock":
+            cmd_notif_unlock(args)
         elif args.notif_cmd == "audit":
             cmd_notif_audit(args)
         elif args.notif_cmd == "filter":

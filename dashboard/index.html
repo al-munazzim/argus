@@ -289,7 +289,7 @@
                 
                 // Notifications table — show pending (non-dismissed) by default
                 const notifications = await fetchData('notifications',
-                    'SELECT * FROM notifications WHERE dismissed = 0 ORDER BY seen_at DESC LIMIT 30');
+                    'SELECT * FROM notifications WHERE dismissed = 0 AND processing = 0 ORDER BY seen_at DESC LIMIT 30');
                 
                 if (notifications.length === 0) {
                     document.getElementById('notifications-table').innerHTML = 
@@ -302,7 +302,15 @@
                         const ownTag = n.is_own_pr ? '🔵 ' : '';
                         const ciTag = n.ci_status ? ` [CI:${n.ci_status}]` : '';
                         const repo_short = n.repo_id ? n.repo_id.split('/').pop() : '-';
-                        const issue = n.url ? `<a href="${n.url}" target="_blank">${repo_short}</a>` : repo_short;
+                        let issueLabel = repo_short;
+                        if (n.url) {
+                            const m = n.url.match(/\/(pull|issues)\/(\d+)/);
+                            if (m) {
+                                const prefix = m[1] === 'pull' ? 'PR' : 'IS';
+                                issueLabel = `${repo_short} ${prefix} #${m[2]}`;
+                            }
+                        }
+                        const issue = n.url ? `<a href="${n.url}" target="_blank">${issueLabel}</a>` : issueLabel;
                         const reasonClass = n.reason === 'mention' ? 'accent' : 
                                           n.reason === 'author' ? 'success' : 
                                           n.reason === 'review_requested' ? 'warning' : '';
