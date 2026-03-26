@@ -652,16 +652,16 @@ def cmd_notif_pull(args) -> None:
         else:
             kept_count += 1
         
-        # Mark as read on GitHub (prevents re-fetching ~5000 stale notifications)
+        # Mark as done on GitHub (DELETE removes from inbox entirely)
         if not args.dry_run and backend == "gh":
             try:
                 subprocess.run(
-                    ["gh", "api", "--method", "PATCH",
+                    ["gh", "api", "--method", "DELETE",
                      f"notifications/threads/{notif_id}"],
                     capture_output=True, text=True, check=False
                 )
             except Exception:
-                pass  # Best-effort — don't fail the pull if marking read fails
+                pass  # Best-effort — don't fail the pull if marking done fails
     
     if not args.dry_run:
         # Record poll
