@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS notifications (
     filter_reason TEXT,
     is_own_pr INTEGER DEFAULT 0,
     ci_status TEXT,
+    processing INTEGER DEFAULT 0,
+    tags TEXT DEFAULT '',
     FOREIGN KEY (issue_id) REFERENCES issues(id),
     FOREIGN KEY (repo_id) REFERENCES repos(id)
 );
