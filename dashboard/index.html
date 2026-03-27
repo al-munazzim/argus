@@ -192,7 +192,7 @@
     <div class="section">
         <div class="card">
             <h2>
-                Recent Notifications
+                🔔 Notifications <span id="poll-info" style="font-weight:normal;font-size:0.7em;color:var(--text-dim)"></span>
                 <button class="refresh-btn" onclick="loadData()">↻ Refresh</button>
             </h2>
             <div id="notifications-table">
@@ -238,6 +238,21 @@
             return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
         }
         
+        function timeAgo(iso) {
+            if (!iso) return '-';
+            const d = new Date(iso);
+            const now = new Date();
+            const diffMs = now - d;
+            const mins = Math.floor(diffMs / 60000);
+            if (mins < 1) return 'just now';
+            if (mins < 60) return `${mins}m ago`;
+            const hrs = Math.floor(mins / 60);
+            const remMins = mins % 60;
+            if (hrs < 24) return remMins > 0 ? `${hrs}h ${remMins}m ago` : `${hrs}h ago`;
+            const days = Math.floor(hrs / 24);
+            return `${days}d ago`;
+        }
+        
         function getNotificationStatus(row) {
             if (row.dismissed) return { class: 'status-dismissed', text: 'Dismissed' };
             if (row.acted_at) return { class: 'status-acted', text: 'Acted' };
@@ -256,41 +271,77 @@
                 
                 const yesterday = new Date(Date.now() - 86400000).toISOString();
                 const activity = await fetchData('activity_log',
-                    `SELECT COUNT(*) as c FROM activity_log WHERE timestamp > '${yesterday}'`);
+                    `SELECT COUNT(*) as c FROM activity_log WHERE timestamp > '${yesterday}' AND action != 'dismiss'`);
                 document.getElementById('activity-count').textContent = activity[0]?.c || 0;
                 
                 const escalations = await fetchData('escalations',
                     "SELECT COUNT(*) as c FROM escalations WHERE status = 'open'");
                 document.getElementById('escalation-count').textContent = escalations[0]?.c || 0;
                 
-                // Notifications table
+                // Last poll info
+                const polls = await fetchData('notification_polls',
+                    'SELECT polled_at, new_count FROM notification_polls ORDER BY polled_at DESC LIMIT 1');
+                if (polls.length > 0) {
+                    const p = polls[0];
+                    document.getElementById('poll-info').textContent = 
+                        `(last poll ${timeAgo(p.polled_at)} — ${p.new_count} new)`;
+                }
+                
+                // Notifications table — show ALL notifications with action taken
                 const notifications = await fetchData('notifications',
-                    'SELECT * FROM notifications ORDER BY seen_at DESC LIMIT 10');
+                    `SELECT n.*, a.detail as action_detail, a.action as action_type
+                     FROM notifications n
+                     LEFT JOIN activity_log a ON a.github_url = n.url
+                     ORDER BY n.seen_at DESC LIMIT 30`);
                 
                 if (notifications.length === 0) {
                     document.getElementById('notifications-table').innerHTML = 
-                        '<div class="loading">No notifications yet.</div>';
+                        '<div class="loading">No notifications yet. ✨</div>';
                 } else {
                     let html = `<table>
-                        <thead><tr><th>Status</th><th>Title</th><th>Repo</th><th>Seen</th></tr></thead>
+                        <thead><tr><th>TIME</th><th>ISSUE</th><th>REASON</th><th>TITLE</th><th>ACTION TAKEN</th></tr></thead>
                         <tbody>`;
                     for (const n of notifications) {
-                        const status = getNotificationStatus(n);
-                        const title = n.url ? `<a href="${n.url}" target="_blank">${n.title}</a>` : n.title;
-                        html += `<tr>
-                            <td><span class="status-badge ${status.class}">${status.text}</span></td>
-                            <td>${title}</td>
-                            <td>${n.repo_id || '-'}</td>
-                            <td class="timestamp">${formatDate(n.seen_at)}</td>
+                        const ownTag = n.is_own_pr ? '🔵 ' : '';
+                        const ciTag = n.ci_status ? ` [CI:${n.ci_status}]` : '';
+                        const repo_short = n.repo_id ? n.repo_id.split('/').pop() : '-';
+                        let issueLabel = repo_short;
+                        if (n.url) {
+                            const m = n.url.match(/\/(pull|issues)\/(\d+)/);
+                            if (m) {
+                                const prefix = m[1] === 'pull' ? 'PR' : 'IS';
+                                issueLabel = `${repo_short} ${prefix} #${m[2]}`;
+                            }
+                        }
+                        const issue = n.url ? `<a href="${n.url}" target="_blank">${issueLabel}</a>` : issueLabel;
+                        const reasonClass = n.reason === 'mention' ? 'accent' : 
+                                          n.reason === 'author' ? 'success' : 
+                                          n.reason === 'review_requested' ? 'warning' : '';
+                        const reasonBadge = `<span class="status-badge ${reasonClass ? 'status-' + reasonClass : ''}" style="background:var(--${reasonClass || 'text-dim'}); color:#000; padding:2px 8px; border-radius:4px; font-size:0.8em">${n.reason}</span>`;
+                        // Action taken column
+                        let actionText = '';
+                        if (n.action_detail) {
+                            actionText = n.action_detail;
+                        } else if (n.dismissed && n.filter_reason) {
+                            actionText = `dismissed: ${n.filter_reason.replace(/^KEEP \(rule\): /, '')}`;
+                        } else if (!n.dismissed) {
+                            actionText = '<span style="color:var(--warning)">pending</span>';
+                        }
+                        html += `<tr style="${n.dismissed ? 'opacity:0.7' : ''}">
+                            <td class="timestamp">${timeAgo(n.seen_at)}</td>
+                            <td>${issue}</td>
+                            <td>${reasonBadge}</td>
+                            <td>${ownTag}${n.title || '-'}${ciTag}</td>
+                            <td style="font-size:0.85em">${actionText}</td>
                         </tr>`;
                     }
                     html += '</tbody></table>';
                     document.getElementById('notifications-table').innerHTML = html;
                 }
                 
-                // Activity table
+                // Activity table — filter out dismissals, show only real actions
                 const activityLog = await fetchData('activity_log',
-                    'SELECT * FROM activity_log ORDER BY timestamp DESC LIMIT 10');
+                    "SELECT * FROM activity_log WHERE action != 'dismiss' ORDER BY timestamp DESC LIMIT 10");
                 
                 if (activityLog.length === 0) {
                     document.getElementById('activity-table').innerHTML = 
