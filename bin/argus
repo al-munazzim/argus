@@ -19,7 +19,7 @@ from typing import Optional
 # Configuration
 # ============================================================================
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 DEFAULT_DB_PATH = Path.home() / ".argus" / "argus.db"
 DEFAULT_PORT = 8100  # Dashboard port; datasette runs on port+1
 
@@ -687,6 +687,8 @@ def _migrate_filter_columns(conn: sqlite3.Connection) -> None:
         "filter_reason": "TEXT", 
         "is_own_pr": "INTEGER DEFAULT 0",
         "ci_status": "TEXT",
+        "processing": "INTEGER DEFAULT 0",
+        "tags": "TEXT DEFAULT ''",
     }
     for col, typedef in migrations.items():
         if col not in columns:
@@ -744,7 +746,11 @@ def cmd_notif_list(args) -> None:
         status = "✓" if n["acted_at"] else ("✗" if n["dismissed"] else ("🔒" if locked else "○"))
         own_tag = " 🔵" if n["is_own_pr"] else ""
         ci_tag = f" [CI:{n['ci_status']}]" if n["ci_status"] else ""
-        print(f"{status}{own_tag}{ci_tag} [{n['id'][:8]}] {n['title'][:60]}")
+        try:
+            tags_str = f" 🏷{n['tags']}" if n["tags"] else ""
+        except (IndexError, KeyError):
+            tags_str = ""
+        print(f"{status}{own_tag}{ci_tag}{tags_str} [{n['id'][:8]}] {n['title'][:60]}")
         print(f"   Repo: {n['repo_id']} | Reason: {n['reason']}")
         if n["filter_reason"]:
             print(f"   Filter: {n['filter_reason']}")
@@ -821,6 +827,88 @@ def cmd_notif_unlock(args) -> None:
     conn.commit()
     conn.close()
     print(f"🔓 Unlocked: {notif['id'][:8]}")
+
+
+def cmd_notif_tag(args) -> None:
+    """Add a tag to a notification."""
+    conn = get_db()
+    _migrate_filter_columns(conn)
+    notif = conn.execute(
+        "SELECT * FROM notifications WHERE id LIKE ?",
+        (f"{args.id}%",)
+    ).fetchone()
+    if not notif:
+        print(f"Error: Notification not found: {args.id}", file=sys.stderr)
+        sys.exit(1)
+    
+    existing_tags = set(filter(None, (notif["tags"] or "").split(",")))
+    existing_tags.add(args.tag)
+    new_tags = ",".join(sorted(existing_tags))
+    
+    conn.execute("UPDATE notifications SET tags = ? WHERE id = ?", (new_tags, notif["id"]))
+    conn.commit()
+    conn.close()
+    print(f"✓ Tagged {notif['id'][:8]} with '{args.tag}' → [{new_tags}]")
+
+
+def cmd_notif_untag(args) -> None:
+    """Remove a tag from a notification."""
+    conn = get_db()
+    _migrate_filter_columns(conn)
+    notif = conn.execute(
+        "SELECT * FROM notifications WHERE id LIKE ?",
+        (f"{args.id}%",)
+    ).fetchone()
+    if not notif:
+        print(f"Error: Notification not found: {args.id}", file=sys.stderr)
+        sys.exit(1)
+    
+    existing_tags = set(filter(None, (notif["tags"] or "").split(",")))
+    existing_tags.discard(args.tag)
+    new_tags = ",".join(sorted(existing_tags))
+    
+    conn.execute("UPDATE notifications SET tags = ? WHERE id = ?", (new_tags, notif["id"]))
+    conn.commit()
+    conn.close()
+    print(f"✓ Untagged {notif['id'][:8]} '{args.tag}' → [{new_tags}]")
+
+
+def cmd_notif_check_prior(args) -> None:
+    """Check if any notification with the same URL has been triaged before.
+    
+    Returns exit code 0 if prior engagement found, 1 if not.
+    Useful for heartbeat triage to avoid duplicate triage comments.
+    """
+    conn = get_db()
+    _migrate_filter_columns(conn)
+    
+    url = args.url
+    
+    # Find any notification with this URL that has been acted on, triaged, or has the 'triaged' tag
+    prior = conn.execute("""
+        SELECT id, title, acted_at, action_taken, tags, seen_at
+        FROM notifications 
+        WHERE url = ? AND (
+            acted_at IS NOT NULL 
+            OR tags LIKE '%triaged%'
+        )
+        ORDER BY seen_at DESC
+        LIMIT 5
+    """, (url,)).fetchall()
+    
+    conn.close()
+    
+    if prior:
+        print(f"⚠ PRIOR ENGAGEMENT FOUND for {url}")
+        for p in prior:
+            tags = f" [tags: {p['tags']}]" if p["tags"] else ""
+            action = f" → {p['action_taken']}" if p["action_taken"] else ""
+            print(f"  [{p['id'][:8]}] seen {p['seen_at'][:10]}{action}{tags}")
+        print(f"\n→ This is a FOLLOW-UP. Do NOT re-triage. Read thread and respond contextually.")
+        sys.exit(0)
+    else:
+        print(f"✓ No prior engagement for {url} — first touch, triage OK.")
+        sys.exit(1)
 
 
 def cmd_notif_dismiss(args) -> None:
@@ -1165,7 +1253,10 @@ def main():
     
     # Notification commands
     notif_parser = subparsers.add_parser("notif", help="Notification management")
-    notif_sub = notif_parser.add_subparsers(dest="notif_cmd")
+    notif_sub = notif_parser.add_subparsers(
+        dest="notif_cmd",
+        help="pull|list|act|dismiss|lock|unlock|tag|untag|check-prior|audit|filter"
+    )
     
     pull_parser = notif_sub.add_parser("pull", help="Pull notifications from GitHub/Forgejo")
     pull_parser.add_argument("--dry-run", action="store_true", help="Show what would be pulled")
@@ -1209,6 +1300,17 @@ def main():
     
     unlock_parser = notif_sub.add_parser("unlock", help="Unlock notification after processing")
     unlock_parser.add_argument("id", help="Notification ID (prefix match)")
+    
+    tag_parser = notif_sub.add_parser("tag", help="Add tag to notification")
+    tag_parser.add_argument("id", help="Notification ID (prefix match)")
+    tag_parser.add_argument("tag", help="Tag to add (e.g. triaged, hostile, follow-up)")
+    
+    untag_parser = notif_sub.add_parser("untag", help="Remove tag from notification")
+    untag_parser.add_argument("id", help="Notification ID (prefix match)")
+    untag_parser.add_argument("tag", help="Tag to remove")
+    
+    check_prior_parser = notif_sub.add_parser("check-prior", help="Check for prior engagement on a URL")
+    check_prior_parser.add_argument("url", help="Issue/PR URL to check")
     
     audit_parser = notif_sub.add_parser("audit", help="Audit stale notifications")
     audit_parser.add_argument("--stale-hours", type=int, help="Hours to consider stale (default: 48)")
@@ -1285,6 +1387,12 @@ def main():
             cmd_notif_lock(args)
         elif args.notif_cmd == "unlock":
             cmd_notif_unlock(args)
+        elif args.notif_cmd == "tag":
+            cmd_notif_tag(args)
+        elif args.notif_cmd == "untag":
+            cmd_notif_untag(args)
+        elif args.notif_cmd == "check-prior":
+            cmd_notif_check_prior(args)
         elif args.notif_cmd == "audit":
             cmd_notif_audit(args)
         elif args.notif_cmd == "filter":
