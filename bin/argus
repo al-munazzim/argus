@@ -590,17 +590,33 @@ def cmd_notif_pull(args) -> None:
     new_count = 0
     kept_count = 0
     dismissed_count = 0
+    reopened_count = 0
     
     for notif in notifications:
         notif_id = notif["id"]
         
         # Check if already exists
         existing = conn.execute(
-            "SELECT id FROM notifications WHERE id = ?",
+            "SELECT id, reason, dismissed FROM notifications WHERE id = ?",
             (notif_id,)
         ).fetchone()
         
         if existing:
+            old_reason = existing[1]
+            was_dismissed = existing[2]
+            new_reason = notif["reason"]
+            # If GitHub still shows this notification (it's unread), and it was
+            # previously dismissed, undismiss it — new activity happened.
+            # Also update the reason if it changed (e.g. subscribed → mention).
+            if was_dismissed or old_reason != new_reason:
+                conn.execute(
+                    "UPDATE notifications SET reason = ?, dismissed = 0, "
+                    "filter_reason = 'RE-OPENED: new activity detected (was dismissed, reason: ' || ? || ' → ' || ? || ')' "
+                    "WHERE id = ?",
+                    (new_reason, old_reason, new_reason, notif_id)
+                )
+                conn.commit()
+                reopened_count += 1
             continue
         
         # Match against pre-fetched own PRs (O(1) lookup, no API call)
@@ -674,7 +690,8 @@ def cmd_notif_pull(args) -> None:
     conn.close()
     
     prefix = "[DRY-RUN] " if args.dry_run else "✓ "
-    print(f"\n{prefix}Pulled {new_count} new ({kept_count} kept, {dismissed_count} auto-dismissed)")
+    reopen_msg = f", {reopened_count} re-opened" if reopened_count else ""
+    print(f"\n{prefix}Pulled {new_count} new ({kept_count} kept, {dismissed_count} auto-dismissed{reopen_msg})")
 
 
 def _migrate_filter_columns(conn: sqlite3.Connection) -> None:
