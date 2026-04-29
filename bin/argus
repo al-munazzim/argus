@@ -605,18 +605,29 @@ def cmd_notif_pull(args) -> None:
             old_reason = existing[1]
             was_dismissed = existing[2]
             new_reason = notif["reason"]
-            # If GitHub still shows this notification (it's unread), and it was
-            # previously dismissed, undismiss it — new activity happened.
-            # Also update the reason if it changed (e.g. subscribed → mention).
-            if was_dismissed or old_reason != new_reason:
+            # Only re-open if the reason actually changed (e.g. subscribed → mention).
+            # If dismissed with same reason, GitHub is just re-serving the same
+            # notification — mark it done on GitHub to stop the loop.
+            if old_reason != new_reason:
                 conn.execute(
                     "UPDATE notifications SET reason = ?, dismissed = 0, "
+                    "action_taken = NULL, acted_at = NULL, "
                     "filter_reason = 'RE-OPENED: new activity detected (was dismissed, reason: ' || ? || ' → ' || ? || ')' "
                     "WHERE id = ?",
                     (new_reason, old_reason, new_reason, notif_id)
                 )
                 conn.commit()
                 reopened_count += 1
+            elif was_dismissed and not args.dry_run and backend == "gh":
+                # Mark as done on GitHub to prevent re-open loop
+                try:
+                    subprocess.run(
+                        ["gh", "api", "--method", "DELETE",
+                         f"notifications/threads/{notif_id}"],
+                        capture_output=True, text=True, check=False
+                    )
+                except Exception:
+                    pass
             continue
         
         # Match against pre-fetched own PRs (O(1) lookup, no API call)
@@ -801,10 +812,12 @@ def cmd_notif_act(args) -> None:
     """, (datetime.now().isoformat(), f"{action}: {detail}".strip(": "), notif["id"]))
     
     # Log the activity
+    # sqlite3.Row doesn't have .get() — use dict() or try/except
+    notif_dict = dict(notif)
     conn.execute("""
         INSERT INTO activity_log (issue_id, action, detail, github_url)
         VALUES (?, ?, ?, ?)
-    """, (notif.get("issue_id"), action, detail or notif["title"], notif.get("url")))
+    """, (notif_dict.get("issue_id"), action, detail or notif_dict.get("title", ""), notif_dict.get("url")))
     
     conn.commit()
     conn.close()
@@ -985,13 +998,15 @@ def cmd_notif_audit(args) -> None:
         print(f"  - {n['title'][:50]}...")
         
         # Create escalation
+        url = n["url"] if "url" in n.keys() and n["url"] else "N/A"
+
         conn.execute("""
             INSERT INTO escalations (category, title, detail)
             VALUES (?, ?, ?)
         """, (
             "stale-notification",
             f"Stale: {n['title'][:100]}",
-            f"Notification {n['id']} has been pending for >{stale_hours}h.\nURL: {n.get('url', 'N/A')}"
+            f"Notification {n['id']} has been pending for >{stale_hours}h.\nURL: {url}"
         ))
     
     conn.commit()
