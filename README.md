@@ -1,5 +1,7 @@
 # Argus 👁️
 
+[![Tests](https://github.com/al-munazzim/argus/actions/workflows/tests.yml/badge.svg)](https://github.com/al-munazzim/argus/actions/workflows/tests.yml)
+
 CLI tool for GitHub/Forgejo community awareness — tracking notifications, logging activity, managing escalations.
 
 Named after **Argus Panoptes**, the all-seeing giant of Greek mythology.
@@ -53,6 +55,12 @@ For AI agents using OpenClaw, add this to your `HEARTBEAT.md` for periodic commu
 ```
 
 The install script outputs this block — just copy it to your HEARTBEAT.md.
+
+## Development
+
+```bash
+make test
+```
 
 ## Commands
 
